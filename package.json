@@ -1,0 +1,9 @@
+{
+  "name": "tauri-app-template",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Standard Tauri v2 tray-app template with full CI/CD and security",
+  "scripts": {
+    "build": "mkdir -p dist && cp index.html dist/index.html"
+  }
+}

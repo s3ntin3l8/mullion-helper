@@ -1,0 +1,21 @@
+name: Hermes (on-demand)
+
+on:
+  issue_comment:
+    types: [created]
+  # NOTE: do NOT add pull_request_review_comment here — a submitted review
+  # fires that event, and review bodies can contain "@s3ntin3l8-hermes",
+  # re-triggering this workflow with no human summon (see .github#527).
+
+jobs:
+  hermes:
+    if: github.actor != 's3ntin3l8-hermes[bot]'
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      checks: write
+    uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@main
+    with:
+      mention-trigger: s3ntin3l8-hermes
+    secrets: inherit # pragma: allowlist secret

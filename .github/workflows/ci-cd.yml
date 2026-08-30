@@ -1,0 +1,19 @@
+name: CI/CD
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  ci-tauri:
+    permissions:
+      contents: read
+    uses: s3ntin3l8/.github/.github/workflows/ci-tauri.yml@main
+    secrets: inherit # pragma: allowlist secret
+
+  dependency-review:
+    permissions:
+      contents: read
+    uses: s3ntin3l8/.github/.github/workflows/dependency-review.yml@main
