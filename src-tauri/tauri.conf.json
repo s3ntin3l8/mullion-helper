@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "tauri-app-template",
+  "productName": "mullion-helper",
   "version": "0.1.0",
-  "identifier": "com.s3ntin3l8.tauri-app-template",
+  "identifier": "com.s3ntin3l8.mullion-helper",
   "build": {
     "frontendDist": "../dist",
     "beforeBuildCommand": "npm run build"

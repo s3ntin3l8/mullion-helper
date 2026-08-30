@@ -1,8 +1,8 @@
 {
-  "name": "tauri-app-template",
+  "name": "mullion-helper",
   "private": true,
   "version": "0.1.0",
-  "description": "Standard Tauri v2 tray-app template with full CI/CD and security",
+  "description": "Native tray app supervising the SSH-agent bridge helper (mullion-session-manager)",
   "scripts": {
     "build": "mkdir -p dist && cp index.html dist/index.html"
   }
