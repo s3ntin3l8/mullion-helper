@@ -132,9 +132,42 @@ fn disable_legacy_service() -> Result<(), String> {
             );
         }
     }
-    let _ = Command::new("taskkill")
-        .args(["/IM", "mullion-helper.exe", "/F"])
-        .status();
+
+    // The retired SEA and this Tauri app intentionally share the
+    // mullion-helper.exe product name. Never use taskkill /IM here: it can
+    // select this process and tear down a successful migration before the
+    // credential is committed. Match the legacy install path and exclude
+    // our PID explicitly.
+    let local_app_data = env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .ok_or_else(|| "LOCALAPPDATA is unavailable; cannot stop the legacy helper".to_owned())?;
+    let legacy_executable = local_app_data.join("Mullion/mullion-helper.exe");
+    let script = r#"
+$legacyPath = [IO.Path]::GetFullPath($args[0])
+$currentPid = [uint32]$args[1]
+$targets = @(Get-CimInstance Win32_Process -Filter "Name = 'mullion-helper.exe'" |
+  Where-Object {
+    $_.ProcessId -ne $currentPid -and
+    $_.ExecutablePath -and
+    [IO.Path]::GetFullPath($_.ExecutablePath) -eq $legacyPath
+  })
+foreach ($target in $targets) {
+  $result = Invoke-CimMethod -InputObject $target -MethodName Terminate
+  if ($result.ReturnValue -ne 0) { exit 1 }
+}
+"#;
+    let status = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .arg(&legacy_executable)
+        .arg(std::process::id().to_string())
+        .status()
+        .map_err(|error| format!("could not stop the legacy helper process: {error}"))?;
+    if !status.success() {
+        return Err(
+            "could not stop the legacy helper process; the imported credential was rolled back"
+                .into(),
+        );
+    }
     Ok(())
 }
 
@@ -155,5 +188,13 @@ mod tests {
         assert!(valid_credential(
             br#"{"baseUrl":"https://example.com","bridgeId":"bridge_1","sessionId":"secret"}"#
         ));
+    }
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_shutdown_targets_the_legacy_path_not_the_image_name() {
+        let source = include_str!("migration.rs");
+        assert!(source.contains("Mullion/mullion-helper.exe"));
+        assert!(!source.contains(r#".args(["/IM""#));
+        assert!(source.contains("$_.ProcessId -ne $currentPid"));
     }
 }
