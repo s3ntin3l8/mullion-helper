@@ -12,3 +12,45 @@ jobs:
       contents: write
       pull-requests: write
     uses: s3ntin3l8/.github/.github/workflows/release-please.yml@main
+
+  build-installers:
+    name: Build ${{ matrix.label }} installer
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - os: macos-14
+            label: macOS Apple Silicon DMG
+            bundles: dmg
+          - os: windows-latest
+            label: Windows x64 NSIS
+            bundles: nsis
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "26"
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: release-${{ matrix.os }}
+      - run: npm ci
+      - run: npm run stage:sidecar
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ needs.release-please.outputs.tag_name }}
+          args: --bundles ${{ matrix.bundles }}
+          updaterJsonPreferNsis: true

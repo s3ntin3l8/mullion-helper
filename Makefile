@@ -10,7 +10,8 @@ install-hooks: ## Install pre-commit hooks
 	pre-commit install
 	pre-commit install --hook-type pre-push
 
-lint: fmt-check ## Run cargo clippy + rustfmt check
+lint: fmt-check ## Run frontend lint + cargo clippy
+	npm run lint
 	cd src-tauri && cargo clippy --all-targets --all-features -- -D warnings
 
 fmt-check: ## Check that all Rust files are rustfmt-clean (CI uses this)
@@ -20,10 +21,13 @@ fmt: ## Auto-fix formatting
 	cd src-tauri && cargo fmt
 
 test: ## Run tests
+	npm test
+	npm run stage:sidecar
 	cd src-tauri && cargo test --all-features
 
 build: ## Build the frontend, then the Tauri app
 	npm ci
+	npm run stage:sidecar
 	npm run build
 	cd src-tauri && cargo build --release
 

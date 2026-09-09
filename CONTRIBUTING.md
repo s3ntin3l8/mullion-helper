@@ -4,11 +4,12 @@
 
 ```sh
 npm ci
+npm run stage:sidecar
 npm run build
 cd src-tauri && cargo build
 ```
 
-Requires a stable Rust toolchain and Tauri's platform build dependencies
+Requires Node.js 26+, a stable Rust toolchain, and Tauri's platform build dependencies
 (on Linux: `libwebkit2gtk-4.1-dev`, `libappindicator3-dev`, `librsvg2-dev`,
 `patchelf`, `build-essential` — see the
 [Tauri prerequisites docs](https://v2.tauri.app/start/prerequisites/) for
