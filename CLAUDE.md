@@ -43,6 +43,14 @@ Conventional Commits PR title (Release Please parses the title, this repo
 squash-merges), full gate before pushing, Hermes review + reply/resolve
 every thread before merge.
 
+## Releases
+
+Release Please treats the repository root as the package so it can update the
+Node, Tauri, and Rust version files in one release PR. Its generic TOML updater
+cannot filter Cargo's `[[package]]` array, so the `Cargo.lock` updater uses the
+numeric package index. `npm run check:versions` recalculates that index and
+reports the replacement JSONPath if dependency changes reorder the lockfile.
+
 ## Conventions
 
 - Rust: `cargo fmt`/`cargo clippy -- -D warnings` are the formatting and lint

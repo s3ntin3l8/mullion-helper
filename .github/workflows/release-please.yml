@@ -83,7 +83,7 @@ jobs:
       matrix:
         include:
           - os: macos-14
-            label: macOS Apple Silicon DMG
+            label: macOS Apple Silicon DMG and updater
             # The updater archive is generated from the macOS app bundle; a
             # DMG-only build explicitly skips updater artifacts.
             bundles: app,dmg
