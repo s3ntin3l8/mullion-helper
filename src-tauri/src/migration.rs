@@ -99,7 +99,12 @@ fn valid_credential(bytes: &[u8]) -> bool {
         .get("sessionId")
         .and_then(Value::as_str)
         .is_some_and(|item| item.len() == 64 && item.bytes().all(|byte| byte.is_ascii_hexdigit()));
-    valid_base_url && valid_bridge_id && valid_session_id
+    let valid_expiration = match value.get("expiresAt") {
+        None => true,
+        Some(Value::String(item)) => chrono::DateTime::parse_from_rfc3339(item).is_ok(),
+        Some(_) => false,
+    };
+    valid_base_url && valid_bridge_id && valid_session_id && valid_expiration
 }
 
 fn is_uuid(value: &str) -> bool {
@@ -222,9 +227,30 @@ mod tests {
         ));
     }
     #[test]
-    fn rejects_credentials_the_worker_would_reject() {
+    fn rejects_invalid_base_url() {
         assert!(!valid_credential(
-            br#"{"baseUrl":"ftp://example.com","bridgeId":"bridge_1","sessionId":"secret"}"#
+            br#"{"baseUrl":"ftp://example.com","bridgeId":"123e4567-e89b-12d3-a456-426614174000","sessionId":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}"#
+        ));
+    }
+    #[test]
+    fn rejects_invalid_bridge_id() {
+        assert!(!valid_credential(
+            br#"{"baseUrl":"https://example.com","bridgeId":"bridge_1","sessionId":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}"#
+        ));
+    }
+    #[test]
+    fn rejects_invalid_session_id() {
+        assert!(!valid_credential(
+            br#"{"baseUrl":"https://example.com","bridgeId":"123e4567-e89b-12d3-a456-426614174000","sessionId":"secret"}"#
+        ));
+    }
+    #[test]
+    fn rejects_invalid_expiration() {
+        assert!(!valid_credential(
+            br#"{"baseUrl":"https://example.com","bridgeId":"123e4567-e89b-12d3-a456-426614174000","sessionId":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","expiresAt":"not-a-date"}"#
+        ));
+        assert!(!valid_credential(
+            br#"{"baseUrl":"https://example.com","bridgeId":"123e4567-e89b-12d3-a456-426614174000","sessionId":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","expiresAt":123}"#
         ));
     }
     #[cfg(target_os = "windows")]

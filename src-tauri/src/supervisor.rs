@@ -8,15 +8,16 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter, Manager};
 
 const WINDOWS_AGENT_PIPE: &str = r"\\.\pipe\openssh-ssh-agent";
+const HEALTHY_CONNECTION_RESET_AFTER: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -78,7 +79,7 @@ struct Inner {
     child: Mutex<Option<Child>>,
     status: Mutex<BridgeStatus>,
     settings: Mutex<Settings>,
-    connection_generation: AtomicUsize,
+    connected_at: Mutex<Option<Instant>>,
 }
 
 #[derive(Clone)]
@@ -97,7 +98,7 @@ impl Supervisor {
             child: Mutex::new(None),
             status: Mutex::new(BridgeStatus::new(BridgeState::Unpaired, None)),
             settings: Mutex::new(settings),
-            connection_generation: AtomicUsize::new(0),
+            connected_at: Mutex::new(None),
         })))
     }
 
@@ -231,7 +232,11 @@ impl Supervisor {
             status.base_url = inspection.base_url;
             status.bridge_id = inspection.bridge_id;
             self.set_status(status);
-            let connection_generation = self.0.connection_generation.load(Ordering::SeqCst);
+            *self
+                .0
+                .connected_at
+                .lock()
+                .expect("connection mutex poisoned") = None;
             let settings = self.settings();
             let mut command = self.worker_command();
             command
@@ -297,7 +302,13 @@ impl Supervisor {
             }
             *self.0.child.lock().expect("child mutex poisoned") = None;
             if self.0.desired.load(Ordering::SeqCst) && !self.0.shutdown.load(Ordering::SeqCst) {
-                if self.0.connection_generation.load(Ordering::SeqCst) > connection_generation {
+                let connected_at = self
+                    .0
+                    .connected_at
+                    .lock()
+                    .expect("connection mutex poisoned")
+                    .take();
+                if should_reset_backoff(connected_at) {
                     attempt = 0;
                 }
                 let delays = [1, 2, 5, 10, 30];
@@ -319,7 +330,11 @@ impl Supervisor {
         };
         match event.get("type").and_then(Value::as_str) {
             Some("connected") => {
-                self.0.connection_generation.fetch_add(1, Ordering::SeqCst);
+                *self
+                    .0
+                    .connected_at
+                    .lock()
+                    .expect("connection mutex poisoned") = Some(Instant::now());
                 let mut status = BridgeStatus::new(BridgeState::Connected, None);
                 status.base_url = event
                     .get("base_url")
@@ -520,6 +535,10 @@ fn clean_worker_error(stderr: &[u8]) -> String {
     }
 }
 
+fn should_reset_backoff(connected_at: Option<Instant>) -> bool {
+    connected_at.is_some_and(|value| value.elapsed() >= HEALTHY_CONNECTION_RESET_AFTER)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -541,5 +560,12 @@ mod tests {
             serde_json::to_string(&BridgeState::NeedsPairing).unwrap(),
             "\"needs_pairing\""
         );
+    }
+    #[test]
+    fn backoff_only_resets_after_a_stable_connection() {
+        assert!(!should_reset_backoff(Some(Instant::now())));
+        assert!(should_reset_backoff(Some(
+            Instant::now() - HEALTHY_CONNECTION_RESET_AFTER
+        )));
     }
 }

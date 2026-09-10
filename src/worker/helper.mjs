@@ -362,7 +362,7 @@ export function stateDir(io) {
     // resolution, possibly missing a file the human expected to find in
     // the path they set. The default fallback chain below always emits
     // an absolute path, so this only bites a deliberate override.
-    // Documented in the Mullion SSH-agent guide linked from this repo's README.
+    // Documented in the Mullion SSH-agent guide linked from this repo's README
     // rather than normalized here, since the operator who set a relative
     // path may have done so on purpose (a tmpdir for a sandboxed test).
     return override;

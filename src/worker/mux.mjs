@@ -141,10 +141,10 @@ class InboundChannel {
   }
 
   send(chunk) {
-    if (this.closed) throw new Error(`ssh-agent-bridge-mux: send() on closed channel ${this.id}`);
+    if (this.closed) throw new Error(`mux: send() on closed channel ${this.id}`);
     if (chunk.length > this.#sendWindowBytes) {
       throw new Error(
-        `ssh-agent-bridge-mux: send() of ${chunk.length} bytes exceeds channel ${this.id}'s ` +
+        `mux: send() of ${chunk.length} bytes exceeds channel ${this.id}'s ` +
           `remaining window of ${this.#sendWindowBytes} — caller must respect sendWindow/onDrain`,
       );
     }

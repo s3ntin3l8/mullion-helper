@@ -77,8 +77,8 @@ async function bundle() {
     format: "cjs",
     target: ESBUILD_TARGET,
     define: { MULLION_WORKER_VERSION: JSON.stringify(pkg.version) },
-    // Node's own WebSocket/fetch globals (ssh-agent-bridge-mux.mjs,
-    // ssh-agent-helper.mjs's renewal loop) are runtime built-ins, not
+    // Node's own WebSocket/fetch globals (mux.mjs and helper.mjs's renewal
+    // loop) are runtime built-ins, not
     // npm packages — nothing to bundle or externalize for those.
     logOverride: { "empty-import-meta": "error" },
   });
