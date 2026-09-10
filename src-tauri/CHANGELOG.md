@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4](https://github.com/s3ntin3l8/mullion-helper/compare/v0.1.3...v0.1.4) (2026-09-10)
+
+
+### Bug Fixes
+
+* **ci:** move dependency-review to its own pull_request workflow ([#24](https://github.com/s3ntin3l8/mullion-helper/issues/24)) ([d347774](https://github.com/s3ntin3l8/mullion-helper/commit/d3477740f67f1b05366ad20aa491c73600e9d94d))
+
 ## [0.1.3](https://github.com/s3ntin3l8/mullion-helper/compare/v0.1.2...v0.1.3) (2026-09-10)
 
 
