@@ -1,6 +1,6 @@
 [package]
 name = "mullion-helper"
-version = "0.1.2"
+version = "0.1.3"
 description = "Native tray app supervising the Mullion SSH-agent bridge"
 edition = "2021"
 
