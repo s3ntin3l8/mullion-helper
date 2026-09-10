@@ -13,18 +13,14 @@ name: Hermes (review)
 # IMPORTANT: do NOT add `synchronize` back. It re-triggers a fresh review on
 # EVERY subsequent push, which on a PR under active iteration is an unbounded
 # review loop (each review's comments prompt more commits, each commit fires
-# another review...). Confirmed in practice on PR #16: 5 pushes while
-# responding to feedback produced 5 separate Hermes review submissions.
-# `ready_for_review` is safe to keep alongside `opened` -- it fires at most
-# once per PR (the draft->ready transition), not on every push.
-#
-# `auto-review` deliberately excludes `mullion/task-*` branches (see the
-# job's own `if:` below) -- that's Task Master's own closed branch namespace
-# (deriveTaskBranchName, git-worktree.ts), and Task Master's own review
-# agent is the terminal review for its tasks; see docs/tasks.md's "External
-# review workflows" section for the full story. `on-demand-review` is NOT
-# excluded -- a human can still explicitly ask for a second opinion on a
-# Task Master PR via `@s3ntin3l8-hermes Review`.
+# another review...). Confirmed in practice on PR #16 (mullion-session-manager):
+# 5 pushes while responding to feedback produced 5 separate Hermes review
+# submissions. `ready_for_review` is safe to keep alongside `opened`: a
+# draft can flip to ready and back to draft and ready again, firing this
+# event more than once, but the reusable workflow's own "Guard against
+# re-trigger (auto mode only)" step (hermes-review.yml's re-trigger guard)
+# skips the run once this bot already has a non-dismissed review on the PR,
+# so repeat `ready_for_review` events don't produce repeat reviews.
 #
 # SECURITY: this repo is public and the reusable workflow runs on a self-hosted
 # runner. For a `pull_request` event, GitHub runs the workflow FILE from the PR's
@@ -53,16 +49,19 @@ on:
 
 jobs:
   auto-review:
+    # NOTE: excluding by PR *author* (github.event.pull_request.user.login),
+    # not github.actor -- on `ready_for_review`, github.actor is whoever
+    # clicked "Ready for review", which is not necessarily who opened the
+    # PR. Author-based exclusion keeps working on both trigger types.
     if: >-
       github.event_name == 'pull_request' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
-      github.actor != 's3ntin3l8-hermes[bot]' &&
-      github.actor != 'dependabot[bot]' &&
-      github.actor != 'github-actions[bot]' &&
-      github.event.pull_request.draft == false &&
-      !startsWith(github.event.pull_request.head.ref, 'mullion/task-')
+      github.event.pull_request.user.login != 's3ntin3l8-hermes[bot]' &&
+      github.event.pull_request.user.login != 'dependabot[bot]' &&
+      github.event.pull_request.user.login != 'github-actions[bot]' &&
+      github.event.pull_request.draft == false
     permissions:
-      contents: write
+      contents: read
       pull-requests: write
       issues: write
       checks: write
@@ -75,13 +74,15 @@ jobs:
   on-demand-review:
     # Restrict to trusted commenters -- otherwise any user on a public repo could
     # post "@s3ntin3l8-hermes Review" and trigger a run that inherits HERMES_*
-    # secrets and executes on the self-hosted runner. Mirrors claude.yml's guard.
+    # secrets and executes on the self-hosted runner. Same author_association
+    # gate the shared reusable workflow enforces for claude.yml's on-demand
+    # path (claude-code.yml).
     if: >-
       github.event_name == 'issue_comment' &&
       github.actor != 's3ntin3l8-hermes[bot]' &&
       contains(fromJSON('["MEMBER", "OWNER", "COLLABORATOR"]'), github.event.comment.author_association)
     permissions:
-      contents: write
+      contents: read
       pull-requests: write
       issues: write
       checks: write
