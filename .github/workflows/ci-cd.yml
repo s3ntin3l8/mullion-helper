@@ -7,10 +7,33 @@ on:
     branches: ["main"]
 
 jobs:
+  frontend-and-worker:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "26"
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - run: npm run stage:sidecar
+      - name: Probe private worker protocol
+        run: |
+          build/worker-sea/mullion-bridge-worker version --json
+          build/worker-sea/mullion-bridge-worker inspect --json
+
   ci-tauri:
     permissions:
       contents: read
     uses: s3ntin3l8/.github/.github/workflows/ci-tauri.yml@main
+    with:
+      node-version: "26"
+      build-script: "ci:prepare"
+      matrix-os: '["windows-latest","macos-14"]'
     secrets: inherit # pragma: allowlist secret
 
   dependency-review:

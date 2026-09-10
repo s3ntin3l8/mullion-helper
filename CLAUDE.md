@@ -12,16 +12,9 @@ audit`).
 
 ## Layout
 
-- `src-tauri/` — the Rust backend. `Cargo.toml` (crate `app`, lib name
-  `app_lib`), `tauri.conf.json` (v2 schema), `src/main.rs` + `src/lib.rs`
-  (the actual app — a tray icon, one "Quit" menu item, no windows),
-  `icons/` (placeholder — replace via `cargo tauri icon <source-image>`).
-- `index.html` / `package.json` — a trivial static frontend whose only job
-  today is giving `tauri.conf.json`'s `frontendDist` something real to embed
-  at build time (`tauri::generate_context!()` reads it at compile time, so
-  both `cargo build` and `cargo test` need it built first — see the Makefile's
-  own step ordering). Replace with a real frontend once there's an actual
-  window/UI to build.
+- `src-tauri/` — tray lifecycle, worker supervision, migration and updater.
+- `src/` — React/Vite status/settings window and the private bridge worker.
+  `npm run stage:sidecar` builds and stages the worker SEA.
 
 ## CI/CD — uses a centralized reusable workflow
 
@@ -54,8 +47,8 @@ every thread before merge.
 
 - Rust: `cargo fmt`/`cargo clippy -- -D warnings` are the formatting and lint
   gates — there's no separate typecheck step the way TypeScript has one.
-- The frontend stays deliberately minimal (plain HTML, no framework) until a
-  real window/UI exists — don't add a React/Vite toolchain speculatively.
+- Keep credentials and process control outside the webview. React receives
+  status metadata but never a persisted session token.
 - `working-directory: src-tauri` is `ci-tauri.yml`'s default assumption for
   where `Cargo.toml` lives — keep it there rather than restructuring the repo
   layout, or override the input explicitly if you do.

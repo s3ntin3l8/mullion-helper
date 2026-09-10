@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "mullion-helper",
+  "productName": "Mullion Helper",
   "version": "0.1.0",
   "identifier": "com.s3ntin3l8.mullion-helper",
   "build": {
@@ -8,17 +8,19 @@
     "beforeBuildCommand": "npm run build"
   },
   "app": {
-    "windows": [],
-    "trayIcon": {
-      "iconPath": "icons/icon.png"
-    },
-    "security": {
-      "csp": null
-    }
+    "windows": [{ "label": "main", "title": "Mullion Helper", "width": 680, "height": 760, "minWidth": 420, "minHeight": 620, "resizable": true, "center": true, "visible": false }],
+    "security": { "csp": "default-src 'self'; img-src 'self' asset:; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost" }
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "createUpdaterArtifacts": true,
+    "targets": ["dmg", "nsis"],
+    "externalBin": ["binaries/mullion-bridge-worker"],
+    "category": "Utility",
+    "shortDescription": "Mullion SSH-agent bridge tray app",
+    "longDescription": "Securely makes your local SSH agent available to your Mullion sessions.",
+    "macOS": { "minimumSystemVersion": "13.5", "signingIdentity": "-" },
+    "windows": { "nsis": { "installMode": "currentUser" } },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -26,5 +28,11 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": ["https://github.com/s3ntin3l8/mullion-helper/releases/latest/download/latest.json"],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDI0NTVGQzJBRDdBOTNFNjUKUldSbFBxblhLdnhWSks3bUwrdW9pZ0VnWlRvMm5ONHZLVWNOWUtGSDdlV0lZL2NHY0JsZEJKbWoK"
+    }
   }
 }

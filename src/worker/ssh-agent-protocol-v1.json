@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "sourceRepository": "s3ntin3l8/mullion-session-manager",
+  "sourceCommit": "72fff2bacc0c",
+  "wireFormat": { "lengthPrefixBytes": 4, "lengthPrefixEndianness": "big", "maxFrameBytes": 262144 },
+  "defaultAllowed": false,
+  "replyDirectionFiltered": false,
+  "sshAgentFailure": { "type": 5, "frameHex": "0000000105" },
+  "muxTransport": { "channelWindowBytes": 262144 },
+  "vectors": [
+    { "type": 1, "name": "SSH_AGENTC_REQUEST_RSA_IDENTITIES", "allowed": false },
+    { "type": 7, "name": "SSH_AGENTC_ADD_RSA_IDENTITY", "allowed": false },
+    { "type": 8, "name": "SSH_AGENTC_REMOVE_RSA_IDENTITY", "allowed": false },
+    { "type": 9, "name": "SSH_AGENTC_REMOVE_ALL_RSA_IDENTITIES", "allowed": false },
+    { "type": 11, "name": "SSH_AGENTC_REQUEST_IDENTITIES", "allowed": true },
+    { "type": 13, "name": "SSH_AGENTC_SIGN_REQUEST", "allowed": true },
+    { "type": 17, "name": "SSH_AGENTC_ADD_IDENTITY", "allowed": false },
+    { "type": 18, "name": "SSH_AGENTC_REMOVE_IDENTITY", "allowed": false },
+    { "type": 19, "name": "SSH_AGENTC_REMOVE_ALL_IDENTITIES", "allowed": false },
+    { "type": 20, "name": "SSH_AGENTC_ADD_SMARTCARD_KEY", "allowed": false },
+    { "type": 21, "name": "SSH_AGENTC_REMOVE_SMARTCARD_KEY", "allowed": false },
+    { "type": 22, "name": "SSH_AGENTC_LOCK", "allowed": false },
+    { "type": 23, "name": "SSH_AGENTC_UNLOCK", "allowed": false },
+    { "type": 24, "name": "SSH_AGENTC_ADD_RSA_ID_CONSTRAINED", "allowed": false },
+    { "type": 25, "name": "SSH_AGENTC_ADD_ID_CONSTRAINED", "allowed": false },
+    { "type": 26, "name": "SSH_AGENTC_ADD_SMARTCARD_KEY_CONSTRAINED", "allowed": false },
+    { "type": 27, "name": "SSH_AGENTC_EXTENSION", "allowed": false }
+  ]
+}
