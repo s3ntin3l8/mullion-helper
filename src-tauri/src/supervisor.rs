@@ -563,6 +563,7 @@ mod tests {
     }
     #[test]
     fn backoff_only_resets_after_a_stable_connection() {
+        assert!(!should_reset_backoff(None));
         assert!(!should_reset_backoff(Some(Instant::now())));
         assert!(should_reset_backoff(Some(
             Instant::now() - HEALTHY_CONNECTION_RESET_AFTER

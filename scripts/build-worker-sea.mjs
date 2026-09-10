@@ -78,8 +78,8 @@ async function bundle() {
     target: ESBUILD_TARGET,
     define: { MULLION_WORKER_VERSION: JSON.stringify(pkg.version) },
     // Node's own WebSocket/fetch globals (mux.mjs and helper.mjs's renewal
-    // loop) are runtime built-ins, not
-    // npm packages — nothing to bundle or externalize for those.
+    // loop) are runtime built-ins, not npm packages — nothing to bundle or
+    // externalize for those.
     logOverride: { "empty-import-meta": "error" },
   });
 }
