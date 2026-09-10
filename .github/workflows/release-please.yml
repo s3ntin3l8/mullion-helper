@@ -73,7 +73,7 @@ jobs:
   build-installers:
     name: Build ${{ matrix.label }} installer
     needs: resolve-release
-    if: ${{ needs.resolve-release.outputs.has_release == 'true' }}
+    if: ${{ always() && needs.resolve-release.result == 'success' && needs.resolve-release.outputs.has_release == 'true' }}
     permissions:
       contents: write
     strategy:
