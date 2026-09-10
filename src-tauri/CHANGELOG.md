@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.2](https://github.com/s3ntin3l8/mullion-helper/compare/v0.1.1...v0.1.2) (2026-09-10)
+
+
+### Bug Fixes
+
+* build installers for path-scoped releases ([#18](https://github.com/s3ntin3l8/mullion-helper/issues/18)) ([b2bedb5](https://github.com/s3ntin3l8/mullion-helper/commit/b2bedb573621b90fc62f53e4463895bc4fe8e42f))
+* expose the Tauri CLI to the release action ([#20](https://github.com/s3ntin3l8/mullion-helper/issues/20)) ([94309ad](https://github.com/s3ntin3l8/mullion-helper/commit/94309ad911fee5cd137fac4dbafb86ae010bb149))
+* prevent installer matrix skip propagation ([#19](https://github.com/s3ntin3l8/mullion-helper/issues/19)) ([9557e1b](https://github.com/s3ntin3l8/mullion-helper/commit/9557e1b730111528293a53c1808807264c30ec17))
+
 ## [0.1.1](https://github.com/s3ntin3l8/mullion-helper/compare/v0.1.0...v0.1.1) (2026-09-10)
 
 
