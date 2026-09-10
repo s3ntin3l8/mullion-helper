@@ -26,7 +26,7 @@ jobs:
     permissions:
       contents: read
     outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
+      has_release: ${{ steps.release.outputs.has_release }}
       tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
       - uses: actions/checkout@v6
@@ -42,24 +42,34 @@ jobs:
           set -euo pipefail
           tag="$REQUESTED_TAG"
           if [[ -z "$tag" ]]; then
-            tag="$(git tag --points-at "$GITHUB_SHA" | sort -V | tail -n 1)"
+            while IFS= read -r candidate; do
+              is_draft="$(gh release view "$candidate" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null || true)"
+              if [[ "$is_draft" == "false" ]]; then
+                tag="$candidate"
+              fi
+            done < <(git tag --points-at "$GITHUB_SHA" | sort -V)
           fi
           if [[ -z "$tag" ]]; then
-            echo "release_created=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No published release points at $GITHUB_SHA; installer build skipped."
+            echo "has_release=false" >> "$GITHUB_OUTPUT"
             exit 0
+          fi
+          if [[ -n "$REQUESTED_TAG" ]] && ! git merge-base --is-ancestor "$tag^{commit}" origin/main; then
+            echo "Release $tag does not point into main" >&2
+            exit 1
           fi
           is_draft="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)"
           if [[ "$is_draft" != "false" ]]; then
             echo "Release $tag is not published" >&2
             exit 1
           fi
-          echo "release_created=true" >> "$GITHUB_OUTPUT"
+          echo "has_release=true" >> "$GITHUB_OUTPUT"
           echo "tag_name=$tag" >> "$GITHUB_OUTPUT"
 
   build-installers:
     name: Build ${{ matrix.label }} installer
     needs: resolve-release
-    if: ${{ needs.resolve-release.outputs.release_created == 'true' }}
+    if: ${{ needs.resolve-release.outputs.has_release == 'true' }}
     permissions:
       contents: write
     strategy:
