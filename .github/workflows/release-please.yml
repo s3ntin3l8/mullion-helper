@@ -73,7 +73,8 @@ jobs:
   build-installers:
     name: Build ${{ matrix.label }} installer
     needs: resolve-release
-    if: ${{ needs.resolve-release.outputs.has_release == 'true' }}
+    # !cancelled() bypasses the skipped release-please ancestor on replays without building after cancellation.
+    if: ${{ !cancelled() && needs.resolve-release.result == 'success' && needs.resolve-release.outputs.has_release == 'true' }}
     permissions:
       contents: write
     strategy:
