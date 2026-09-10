@@ -1,21 +1,136 @@
-name: Hermes (on-demand)
+name: Hermes (review)
 
+# Two ways to get a review from the s3ntin3l8-hermes bot:
+#   1. auto-review    -> exactly once per PR: on `opened` if it starts non-draft,
+#      or on `ready_for_review` if it starts as a draft.
+#   2. on-demand-review -> comment "@s3ntin3l8-hermes Review" (or "Triage" on
+#      an issue) any time you want another look -- including every follow-up
+#      after the initial auto-review.
+# Both call the same reusable workflow (s3ntin3l8/.github/.github/workflows/
+# hermes-review.yml@main) with a different `mode`, gated by github.event_name
+# so each job only runs for its own trigger.
+#
+# IMPORTANT: do NOT add `synchronize` back. It re-triggers a fresh review on
+# EVERY subsequent push, which on a PR under active iteration is an unbounded
+# review loop (each review's comments prompt more commits, each commit fires
+# another review...). Confirmed in practice on PR #16 (mullion-session-manager):
+# 5 pushes produced 3 separate Hermes review submissions (not 5 -- the actual
+# count, corrected after re-checking the record). `ready_for_review` is safe
+# to keep alongside `opened`: a draft can flip to ready and back to draft and
+# ready again, firing this event more than once, but repeat `ready_for_review`
+# events are SUPPOSED to be bounded by the reusable workflow's own "Guard
+# against re-trigger (auto mode only)" step, which is meant to skip the run
+# once this bot already has a non-dismissed review on the PR. That guard was
+# actually broken until s3ntin3l8/.github#54 (a `gh api --jq --arg` invocation
+# that silently failed and always reported "no prior review found") -- fixed
+# there, so this protection is real only from that fix onward.
+#
+# `auto-review` also excludes `mullion/task-*` head branches -- Task Master's
+# own reviewer bot already reviews its own task PRs, across ANY Mullion-
+# managed repo (not just mullion-session-manager's own codebase -- Task
+# Master operates on repos it doesn't live in, including this one), so an
+# unscoped auto-review here only races the task's approve/merge
+# (mullion-session-manager#998). This is a deliberate, documented invariant,
+# not dead weight: the branch-naming redesign in that repo explicitly kept
+# the `mullion/task-` prefix stable specifically so pattern-matching safety
+# checks like this one keep working. `on-demand-review` stays ungated -- a
+# human can still explicitly ask for a second opinion on a Task Master PR.
+# (This exclusion, along with the fork guard and the trusted-commenter gate
+# below, is now ALSO enforced automatically inside the reusable workflow
+# itself as of s3ntin3l8/.github#54 -- the caller-side copies here are
+# defense-in-depth, not the only line of defense.)
+#
+# SECURITY: this repo is public and the reusable workflow runs on a self-hosted
+# runner. For a `pull_request` event, GitHub runs the workflow FILE from the PR's
+# own head ref, i.e. a fork's copy of this file, on whatever runner the `if:`
+# lets it reach. Without the `head.repo.full_name` guard below, any stranger
+# could open a fork PR whose version of auto-review's job runs arbitrary steps
+# on that runner -- fork PRs get no secrets and a read-only token, but the
+# runner itself (its filesystem and LAN access) is the trust boundary, not the
+# token. The on-demand path is unaffected: `issue_comment` always runs the
+# DEFAULT BRANCH's copy of this file, so the author_association gate there is
+# sufficient on its own; a maintainer's @mention on a fork PR still works.
+# (The same fork guard is also enforced inside the reusable workflow itself,
+# as defense-in-depth -- belt-and-braces, not redundant.) Caveat: this guard
+# stops a drive-by fork that leaves the `if:` alone -- a fork that rewrites
+# this file can delete the guard (or replace the `uses:` job with inline
+# steps) entirely, since it's the fork's own copy that runs. The durable
+# control against that is the repo setting requiring approval before a
+# fork's workflow runs at all, not this guard by itself.
 on:
+  pull_request:
+    types: [opened, ready_for_review]
+    # `opened`           => review once, if the PR starts non-draft.
+    # `ready_for_review`  => review once, if the PR started as a draft (its
+    # `opened` event is skipped below since draft was true at that point).
   issue_comment:
     types: [created]
-  # NOTE: do NOT add pull_request_review_comment here — a submitted review
-  # fires that event, and review bodies can contain "@s3ntin3l8-hermes",
-  # re-triggering this workflow with no human summon (see .github#527).
+    # Covers both PR-conversation comments and issue comments. The reusable
+    # workflow's "Check mention" step enforces the "@s3ntin3l8-hermes" substring
+    # in on-demand mode (default), so a plain comment without the mention is a
+    # cheap no-op, not a review.
 
 jobs:
-  hermes:
-    if: github.actor != 's3ntin3l8-hermes[bot]'
+  auto-review:
+    # NOTE: excluding by PR *author* (github.event.pull_request.user.login),
+    # not github.actor -- on `ready_for_review`, github.actor is whoever
+    # clicked "Ready for review", which is not necessarily who opened the
+    # PR. Author-based exclusion keeps working on both trigger types.
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login != 's3ntin3l8-hermes[bot]' &&
+      github.event.pull_request.user.login != 'dependabot[bot]' &&
+      github.event.pull_request.user.login != 'github-actions[bot]' &&
+      github.event.pull_request.draft == false &&
+      !startsWith(github.event.pull_request.head.ref, 'mullion/task-')
+    # All `read`: the reusable never writes via GITHUB_TOKEN -- every GitHub
+    # write (the review itself, comments, checks) goes through its own App
+    # token, minted from HERMES_APP_ID/HERMES_APP_PRIVATE_KEY. GITHUB_TOKEN
+    # is only used read-only, to check out the shared prompt repo (contents
+    # only) -- pull-requests/issues/checks: read aren't load-bearing either,
+    # kept as harmless future-proofing rather than a requirement.
     permissions:
-      contents: write
-      pull-requests: write
-      issues: write
-      checks: write
+      contents: read
+      pull-requests: read
+      issues: read
+      checks: read
+    # Serialize against on-demand-review for the same PR: the reusable's
+    # re-trigger guard only skips a run once a review is already POSTED, so
+    # an `opened` auto-review and a same-minute "@mention" can otherwise both
+    # get dispatched concurrently. Shared group name with on-demand-review
+    # below queues them instead of letting them overlap.
+    concurrency:
+      group: hermes-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: false
     uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@main
     with:
+      mode: auto # review on trigger, no @mention needed
       mention-trigger: s3ntin3l8-hermes
+    secrets: inherit # pragma: allowlist secret
+
+  on-demand-review:
+    # Restrict to trusted commenters -- otherwise any user on a public repo could
+    # post "@s3ntin3l8-hermes Review" and trigger a run that inherits HERMES_*
+    # secrets and executes on the self-hosted runner. Same author_association
+    # gate the shared reusable workflow enforces for claude.yml's on-demand
+    # path (claude-code.yml).
+    if: >-
+      github.event_name == 'issue_comment' &&
+      github.actor != 's3ntin3l8-hermes[bot]' &&
+      contains(fromJSON('["MEMBER", "OWNER", "COLLABORATOR"]'), github.event.comment.author_association)
+    # All `read` -- same reasoning as auto-review's permissions block above.
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      checks: read
+    # Same concurrency group as auto-review above -- queues instead of
+    # overlapping when both can target the same PR.
+    concurrency:
+      group: hermes-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: false
+    uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@main
+    with:
+      mention-trigger: s3ntin3l8-hermes # mode: on-demand is the reusable workflow's default
     secrets: inherit # pragma: allowlist secret
