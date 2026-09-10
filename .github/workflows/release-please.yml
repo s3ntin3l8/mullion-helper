@@ -5,18 +5,61 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing published release tag whose installers should be built
+        required: false
+        type: string
 
 jobs:
   release-please:
+    if: ${{ github.event_name == 'push' || inputs.release_tag == '' }}
     permissions:
       contents: write
       pull-requests: write
     uses: s3ntin3l8/.github/.github/workflows/release-please.yml@main
 
+  resolve-release:
+    needs: release-please
+    if: ${{ always() && (needs.release-please.result == 'success' || inputs.release_tag != '') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Resolve published release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ inputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$REQUESTED_TAG"
+          if [[ -z "$tag" ]]; then
+            tag="$(git tag --points-at "$GITHUB_SHA" | sort -V | tail -n 1)"
+          fi
+          if [[ -z "$tag" ]]; then
+            echo "release_created=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          is_draft="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)"
+          if [[ "$is_draft" != "false" ]]; then
+            echo "Release $tag is not published" >&2
+            exit 1
+          fi
+          echo "release_created=true" >> "$GITHUB_OUTPUT"
+          echo "tag_name=$tag" >> "$GITHUB_OUTPUT"
+
   build-installers:
     name: Build ${{ matrix.label }} installer
-    needs: release-please
-    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    needs: resolve-release
+    if: ${{ needs.resolve-release.outputs.release_created == 'true' }}
     permissions:
       contents: write
     strategy:
@@ -34,6 +77,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve-release.outputs.tag_name }}
       - uses: actions/setup-node@v6
         with:
           node-version: "26"
@@ -51,6 +96,6 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ needs.release-please.outputs.tag_name }}
+          tagName: ${{ needs.resolve-release.outputs.tag_name }}
           args: --bundles ${{ matrix.bundles }}
           updaterJsonPreferNsis: true
