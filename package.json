@@ -1,7 +1,7 @@
 {
   "name": "mullion-helper",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "Native tray app for the Mullion SSH-agent bridge",
   "engines": {
@@ -15,7 +15,8 @@
     "ci:prepare": "npm run stage:sidecar && npm run build",
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.app.json && tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.worker.json",
-    "lint": "eslint ."
+    "lint": "eslint . && npm run check:versions",
+    "check:versions": "node scripts/check-version-consistency.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",
