@@ -1,16 +1,16 @@
-// Issue #820 (round 4 PR2) — composes ssh-agent-bridge-mux.mjs's channel
-// piping primitives with ssh-agent-filter.mjs's sign-only classifier into
+// Issue #820 (round 4 PR2) — composes mux.mjs's channel piping primitives
+// with filter.mjs's sign-only classifier into
 // the one relay the bundled worker needs: requests flowing FROM the
 // primary (mux channel) TOWARD the real local agent (net.Socket) are
 // filtered; replies flowing back are relayed unmodified. Direct structural
 // mirror of src/services/ssh-agent-relay.ts, which composes
 // src/services/ssh-agent-filter.ts the same way for the primary-side leg —
 // see that module's own header comment. THIS module is the authoritative
-// enforcement point (ssh-agent-filter.mjs's own header comment); the
+// enforcement point (filter.mjs's own header comment); the
 // primary-side one is defense in depth.
 //
 // `socket` is the laptop's real local agent connection
-// (`net.connect({path: sshAuthSock})` in ssh-agent-helper.mjs's runRun).
+// (`net.connect({path: sshAuthSock})` in helper.mjs's runRun).
 // `channel` is the mux channel toward the bridge/primary. Both must
 // already be open/accepted.
 import { SignOnlyFilter, SshAgentFrameTooLargeError } from "./filter.mjs";

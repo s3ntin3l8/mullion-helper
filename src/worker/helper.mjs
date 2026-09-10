@@ -6,7 +6,7 @@
 //     pairing code over /ws/agent-bridge, and persists the resulting
 //     session credential.
 //   - `run` — long-running. Re-authenticates with the persisted credential,
-//     wraps the connection in the inbound-only mux (ssh-agent-bridge-mux.mjs),
+//     wraps the connection in the inbound-only mux (mux.mjs),
 //     and for every channel the primary opens, dials this laptop's own real
 //     SSH_AUTH_SOCK and pipes the two together.
 //   - `inspect` / `version` — machine-readable metadata for the supervisor.
@@ -54,7 +54,7 @@ export function buildWorkerIo() {
   };
 }
 
-// Mirrors ssh-agent-fanout.ts's own reconnect ladder (src/services/) —
+// Mirrors upstream Mullion's src/services/ssh-agent-fanout.ts reconnect ladder —
 // same reasoning: fast retries for a blip, backing off for a genuinely
 // unreachable primary, never giving up outright (a laptop that's asleep
 // for hours must resume forwarding on its own once it wakes, with no
@@ -362,7 +362,7 @@ export function stateDir(io) {
     // resolution, possibly missing a file the human expected to find in
     // the path they set. The default fallback chain below always emits
     // an absolute path, so this only bites a deliberate override.
-    // Documented in docs/ssh-agent.md's "Credential storage" section
+    // Documented in the Mullion SSH-agent guide linked from this repo's README.
     // rather than normalized here, since the operator who set a relative
     // path may have done so on purpose (a tmpdir for a sandboxed test).
     return override;
@@ -609,7 +609,7 @@ async function runRun(args, io) {
   // stdout, a stream `run` has never written anything to before now (only
   // `pair` does) — the existing stderr prose is UNCHANGED, so any
   // supervisor/log-watcher already parsing it keeps working exactly as
-  // today. See docs/ssh-agent.md for the documented event shapes.
+  // today. See src/worker/README.md for the documented event shapes.
   const jsonEvents = flags["json-events"] === true;
   function emitEvent(type, data = {}) {
     if (!jsonEvents) return;
@@ -626,7 +626,7 @@ async function runRun(args, io) {
       "no SSH_AUTH_SOCK in this process's environment — pass --ssh-auth-sock <path>, or run this " +
         "under a shell that has SSH_AUTH_SOCK set. Note: a launchd/systemd/autostart job does " +
         "NOT inherit your login shell's SSH_AUTH_SOCK — hardcode the real path there instead (see " +
-        "docs/ssh-agent.md).\n",
+        "https://github.com/s3ntin3l8/mullion-session-manager/blob/main/docs/ssh-agent.md).\n",
     );
     return 1;
   }
@@ -799,7 +799,7 @@ async function runRun(args, io) {
       }
       renewAttempt++;
       io.stderr.write(`session renewal attempt failed (${err.message}) — retrying in ${delay}ms\n`);
-      emitEvent("renewal_retry", { delay_ms: delay });
+      emitEvent("renewal_retry", { delay_ms: delay, message: err.message });
       renewTimer = setTimeout(() => void renewSession(), delay);
     }
   }
@@ -877,7 +877,7 @@ async function runRun(args, io) {
           socket.on("error", () => channel.close());
           // Round 4 (issue #820) — filtered, not the raw pipeNetSocketToChannel:
           // this is the authoritative sign-only enforcement point
-          // (ssh-agent-filter.mjs's own header comment) between the primary
+          // (filter.mjs's own header comment) between the primary
           // and the real local agent. Requests are classified; only
           // REQUEST_IDENTITIES/SIGN_REQUEST ever reach `socket`. Replies are
           // relayed unmodified, same as before.

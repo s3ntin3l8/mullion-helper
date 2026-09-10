@@ -1,23 +1,18 @@
 // Issue #820 (round 4, tray-repo prerequisites) — a minimal, dependency-free
-// port of src/services/ssh-agent-filter.ts's sign-only classifier for the
-// private bundled worker. Deliberately NOT imported from src/services/: same
-// reasoning as ssh-agent-bridge-mux.mjs's own header comment — this file
+// port of Mullion's src/services/ssh-agent-filter.ts sign-only classifier for
+// the private bundled worker. Deliberately NOT imported from Mullion: same
+// reasoning as mux.mjs's own header comment — this file
 // runs standalone on a laptop with no Mullion checkout at all, bundled
 // directly into the Node SEA (scripts/build-worker-sea.mjs), and the
 // `.mjs` CLI tree is zero-dependency, `node:` builtins only, no build step.
 // Both sides of this classifier are deliberately maintained as two separate
-// implementations; a change to SSH_AGENT_REQUEST_TYPE_VECTORS in
-// ssh-agent-filter.ts must be mirrored here by hand — grep this repo for
-// "ssh-agent-filter.ts" if you're touching one and forget the other exists.
+// implementations; a change to SSH_AGENT_REQUEST_TYPE_VECTORS in upstream
+// Mullion's ssh-agent-filter.ts must be mirrored here and in
+// ssh-agent-protocol-v1.json.
 //
-// Unlike ssh-agent-bridge-mux.mjs (a hand-mirrored PORT with no shared
-// source of truth beyond code review), this twin's own test suite
-// (test/cli/ssh-agent-filter.test.ts) additionally validates against
-// test/fixtures/ssh-agent-filter-vectors.json — the machine-readable
-// fixture round 4 PR1 generates FROM ssh-agent-filter.ts's own table. Both
-// implementations are provably checked against that one shared source, not
-// just against each other by hand, closing (for this module) the exact
-// drift risk the mux twin's own comment warns about.
+// This twin's filter.test.ts validates the complete table against
+// ssh-agent-protocol-v1.json, the machine-readable fixture extracted from
+// Mullion. Updating only code or fixture therefore fails this repo's tests.
 //
 // This module is now the AUTHORITATIVE enforcement point the TypeScript
 // module's own header comment has described since issue #820's original
@@ -39,20 +34,18 @@
 // Wire format (draft-miller-ssh-agent, the protocol OpenSSH/1Password/every
 // real ssh-agent speaks): each message is a 4-byte big-endian length prefix
 // followed by that many bytes of body, whose first byte is the message
-// type. Framing here deliberately mirrors ssh-agent-bridge-mux.mjs's own
+// type. Framing here deliberately mirrors mux.mjs's own
 // decodeFrame — fixed-width header, fail-closed on anything malformed —
 // but is a distinct length-prefixed format (SSH agent protocol's own), not
 // this repo's mux frame format; the two must not be conflated.
 
 export const LENGTH_PREFIX_BYTES = 4;
 
-// Matches CHANNEL_WINDOW_BYTES in ssh-agent-bridge-mux.mjs — see
+// Matches CHANNEL_WINDOW_BYTES in mux.mjs — see
 // ssh-agent-filter.ts's own doc comment for why this ceiling was chosen.
 // Issue #1059 — this value is also pinned in
-// test/fixtures/ssh-agent-filter-vectors.json (`wireFormat.maxFrameBytes`),
-// and test/cli/ssh-agent-filter-constants.test.ts asserts this export
-// matches the fixture AND the TS twin's matching export — a hand-edit
-// that changes only one side fails the test instead of silently drifting.
+// ssh-agent-protocol-v1.json (`wireFormat.maxFrameBytes`), and
+// filter.test.ts asserts this export matches the fixture.
 export const MAX_FRAME_BYTES = 256 * 1024;
 
 // SSH_AGENTC_* — client REQUEST message types this filter classifies.
@@ -83,9 +76,8 @@ export const SSH_AGENT_FAILURE = 5;
  * The conformance table: every known `SSH_AGENTC_*` request type mapped to
  * its allow/block decision and a human name. Must match
  * src/services/ssh-agent-filter.ts's own SSH_AGENT_REQUEST_TYPE_VECTORS
- * exactly, and test/cli/ssh-agent-filter.test.ts asserts this table matches
- * test/fixtures/ssh-agent-filter-vectors.json byte for byte, not just "by
- * eye" against the TS source.
+ * exactly; filter.test.ts asserts this table matches
+ * ssh-agent-protocol-v1.json byte for byte.
  *
  * Only `SSH_AGENTC_REQUEST_IDENTITIES` and `SSH_AGENTC_SIGN_REQUEST` are
  * allowed — everything else (in particular every ADD_IDENTITY, REMOVE_*,

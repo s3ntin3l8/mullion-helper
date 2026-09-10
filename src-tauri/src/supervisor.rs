@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     thread,
@@ -78,6 +78,7 @@ struct Inner {
     child: Mutex<Option<Child>>,
     status: Mutex<BridgeStatus>,
     settings: Mutex<Settings>,
+    connection_generation: AtomicUsize,
 }
 
 #[derive(Clone)]
@@ -96,6 +97,7 @@ impl Supervisor {
             child: Mutex::new(None),
             status: Mutex::new(BridgeStatus::new(BridgeState::Unpaired, None)),
             settings: Mutex::new(settings),
+            connection_generation: AtomicUsize::new(0),
         })))
     }
 
@@ -229,6 +231,7 @@ impl Supervisor {
             status.base_url = inspection.base_url;
             status.bridge_id = inspection.bridge_id;
             self.set_status(status);
+            let connection_generation = self.0.connection_generation.load(Ordering::SeqCst);
             let settings = self.settings();
             let mut command = self.worker_command();
             command
@@ -267,9 +270,12 @@ impl Supervisor {
                 });
             }
             if let Some(stderr) = stderr {
-                thread::spawn(
-                    move || for _line in BufReader::new(stderr).lines().map_while(Result::ok) {},
-                );
+                let supervisor = self.clone();
+                thread::spawn(move || {
+                    for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                        supervisor.handle_stderr(&line);
+                    }
+                });
             }
             loop {
                 if !self.0.desired.load(Ordering::SeqCst) || self.0.shutdown.load(Ordering::SeqCst)
@@ -291,6 +297,9 @@ impl Supervisor {
             }
             *self.0.child.lock().expect("child mutex poisoned") = None;
             if self.0.desired.load(Ordering::SeqCst) && !self.0.shutdown.load(Ordering::SeqCst) {
+                if self.0.connection_generation.load(Ordering::SeqCst) > connection_generation {
+                    attempt = 0;
+                }
                 let delays = [1, 2, 5, 10, 30];
                 let delay = delays[attempt.min(delays.len() - 1)];
                 attempt += 1;
@@ -310,6 +319,7 @@ impl Supervisor {
         };
         match event.get("type").and_then(Value::as_str) {
             Some("connected") => {
+                self.0.connection_generation.fetch_add(1, Ordering::SeqCst);
                 let mut status = BridgeStatus::new(BridgeState::Connected, None);
                 status.base_url = event
                     .get("base_url")
@@ -353,6 +363,24 @@ impl Supervisor {
                 ));
             }
             _ => {}
+        }
+    }
+
+    fn handle_stderr(&self, line: &str) {
+        let detail: String = line.trim().chars().take(500).collect();
+        if detail.is_empty() {
+            return;
+        }
+        let mut status = self.0.status.lock().expect("status mutex poisoned");
+        if matches!(
+            status.state,
+            BridgeState::Starting | BridgeState::Connected | BridgeState::Reconnecting
+        ) {
+            status.detail = Some(detail);
+            status.updated_at = Utc::now().to_rfc3339();
+            let snapshot = status.clone();
+            drop(status);
+            let _ = self.0.app.emit("bridge-status", snapshot);
         }
     }
 

@@ -1,7 +1,7 @@
 // Issue #820 (PR6) — deliberately duplicated from
 // src/services/bridge-registry.ts's decodePairingPayload(), not imported:
 // that module pulls in drizzle-orm and the DB schema, neither of which
-// belong in a standalone laptop CLI (see ssh-agent-bridge-mux.mjs's own
+// belong in a standalone laptop CLI (see mux.mjs's own
 // header comment for the general "why duplicated, not shared" reasoning).
 // The format itself — plain base64url of `{baseUrl, code}` — is stable and
 // intentionally trivial precisely so two independent implementations can't
@@ -38,7 +38,7 @@ export function decodePairingPayload(encoded) {
   return { baseUrl, code };
 }
 
-/** Mirrors ssh-agent-bridge-helper.mjs's own `isValidHttpBaseUrl` — kept
+/** Mirrors helper.mjs's own `isValidHttpBaseUrl` — kept
  * local here so this module has no other source dependency. If either
  * side ever changes the rule, the other must be updated by hand (see the
  * file header above). */

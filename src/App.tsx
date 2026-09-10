@@ -51,6 +51,7 @@ export function App() {
     await act(async () => {
       const paired = await api.pair(payload.trim());
       if (api.isDesktop && !(await isEnabled())) await enable();
+      await refresh();
       setPayload(""); return paired;
     });
   }

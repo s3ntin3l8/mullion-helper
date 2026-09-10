@@ -7,49 +7,63 @@ pub struct MigrationState(pub Mutex<Option<PendingMigration>>);
 
 pub struct PendingMigration {
     destination: PathBuf,
+    marker: PathBuf,
     completed: bool,
+    remove_destination_on_rollback: bool,
 }
 
 impl PendingMigration {
     pub fn commit(mut self) -> Result<(), String> {
         disable_legacy_service()?;
-        let marker = self
-            .destination
-            .parent()
-            .and_then(|path| path.parent())
-            .map(|path| path.join("legacy-migration.json"));
-        if let Some(marker) = marker {
-            let _ = fs::write(
-                marker,
-                b"{\"credential_imported\":true,\"legacy_service_disabled\":true}\n",
-            );
-        }
+        // Once the old service is disabled, never delete a credential that
+        // the new app has already proven it can use. If writing the marker
+        // fails, the next launch safely retries only the idempotent cleanup.
         self.completed = true;
-        Ok(())
+        fs::write(
+            &self.marker,
+            b"{\"credential_imported\":true,\"legacy_service_disabled\":true}\n",
+        )
+        .map_err(|error| format!("could not record completion of the legacy migration: {error}"))
     }
 
     pub fn rollback(self) {
-        let _ = fs::remove_file(&self.destination);
+        if self.remove_destination_on_rollback {
+            let _ = fs::remove_file(&self.destination);
+        }
     }
 }
 
 impl Drop for PendingMigration {
     fn drop(&mut self) {
-        if !self.completed {
+        if !self.completed && self.remove_destination_on_rollback {
             let _ = fs::remove_file(&self.destination);
         }
     }
 }
 
 pub fn import_legacy_credential(app_data_dir: &std::path::Path) -> Option<PendingMigration> {
-    let destination = app_data_dir.join("worker/ssh-agent-bridge.json");
-    if destination.exists() {
+    let marker = app_data_dir.join("legacy-migration.json");
+    if marker.exists() {
         return None;
     }
+    let destination = app_data_dir.join("worker/ssh-agent-bridge.json");
     let source = legacy_credential_path()?;
     let bytes = fs::read(source).ok()?;
     if !valid_credential(&bytes) {
         return None;
+    }
+    if let Ok(existing) = fs::read(&destination) {
+        if valid_credential(&existing) {
+            let remove_destination_on_rollback = existing == bytes;
+            return Some(PendingMigration {
+                destination,
+                marker,
+                completed: false,
+                // An identical file is an interrupted import. A different,
+                // valid file belongs to the new app and must survive rollback.
+                remove_destination_on_rollback,
+            });
+        }
     }
     fs::create_dir_all(destination.parent()?).ok()?;
     let temporary = destination.with_extension("tmp");
@@ -62,7 +76,9 @@ pub fn import_legacy_credential(app_data_dir: &std::path::Path) -> Option<Pendin
     fs::rename(temporary, &destination).ok()?;
     Some(PendingMigration {
         destination,
+        marker,
         completed: false,
+        remove_destination_on_rollback: true,
     })
 }
 
@@ -70,12 +86,28 @@ fn valid_credential(bytes: &[u8]) -> bool {
     let Ok(value) = serde_json::from_slice::<Value>(bytes) else {
         return false;
     };
-    ["baseUrl", "bridgeId", "sessionId"].into_iter().all(|key| {
-        value
-            .get(key)
-            .and_then(Value::as_str)
-            .is_some_and(|item| !item.is_empty())
-    })
+    let valid_base_url = value
+        .get("baseUrl")
+        .and_then(Value::as_str)
+        .and_then(|item| url::Url::parse(item).ok())
+        .is_some_and(|item| matches!(item.scheme(), "http" | "https"));
+    let valid_bridge_id = value
+        .get("bridgeId")
+        .and_then(Value::as_str)
+        .is_some_and(is_uuid);
+    let valid_session_id = value
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .is_some_and(|item| item.len() == 64 && item.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    valid_base_url && valid_bridge_id && valid_session_id
+}
+
+fn is_uuid(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => byte.is_ascii_hexdigit(),
+        })
 }
 
 fn legacy_credential_path() -> Option<PathBuf> {
@@ -186,7 +218,13 @@ mod tests {
     #[test]
     fn accepts_legacy_shape() {
         assert!(valid_credential(
-            br#"{"baseUrl":"https://example.com","bridgeId":"bridge_1","sessionId":"secret"}"#
+            br#"{"baseUrl":"https://example.com","bridgeId":"123e4567-e89b-12d3-a456-426614174000","sessionId":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}"#
+        ));
+    }
+    #[test]
+    fn rejects_credentials_the_worker_would_reject() {
+        assert!(!valid_credential(
+            br#"{"baseUrl":"ftp://example.com","bridgeId":"bridge_1","sessionId":"secret"}"#
         ));
     }
     #[cfg(target_os = "windows")]

@@ -44,10 +44,8 @@ export const FrameType = Object.freeze({
 // correctness (each side clamps to what IT was granted), just make this
 // side needlessly send WINDOW_ADJUST more or less often than intended.
 // Issue #1059 — this value is also pinned in
-// test/fixtures/ssh-agent-filter-vectors.json (`muxTransport.channelWindowBytes`),
-// and test/cli/ssh-agent-filter-constants.test.ts asserts this export
-// matches the fixture AND the TS twin's matching export — a hand-edit
-// that changes only one side fails the test instead of silently drifting.
+// ssh-agent-protocol-v1.json (`muxTransport.channelWindowBytes`), and
+// mux.test.ts asserts this export matches the fixture.
 export const CHANNEL_WINDOW_BYTES = 256 * 1024;
 const WINDOW_ADJUST_THRESHOLD_BYTES = CHANNEL_WINDOW_BYTES / 2;
 
@@ -328,9 +326,9 @@ export function attachInboundMux(ws, opts) {
 /**
  * The socket->channel half of `pipeNetSocketToChannel` below — the real
  * agent's own REPLIES flowing back out. Split out (round 4 PR2, issue
- * #820) so `ssh-agent-filtered-relay.mjs` can compose this UNFILTERED half
+ * #820) so `filtered-relay.mjs` can compose this UNFILTERED half
  * unchanged with its own filtered request-direction half — replies are
- * never filtered (see ssh-agent-filter.mjs's own header comment on why).
+ * never filtered (see filter.mjs's own header comment on why).
  * Kept in this file, not the relay module: this is still pure mux-frame
  * plumbing, no agent-protocol awareness, matching this file's own role as
  * transport only (mirrors src/services/ssh-agent-mux.ts's own
@@ -386,7 +384,7 @@ export function pipeSocketRepliesToChannel(socket, channel) {
  * The channel->socket half of `pipeNetSocketToChannel` below — REQUESTS
  * flowing in toward the real agent, unfiltered. Split out for the same
  * reason as `pipeSocketRepliesToChannel` above; unlike that half, this one
- * is NOT reused unfiltered by `ssh-agent-filtered-relay.mjs` — that module
+ * is NOT reused unfiltered by `filtered-relay.mjs` — that module
  * reimplements this direction itself with `SignOnlyFilter` inserted, since
  * the two need different framing (filtered request handling has to
  * classify each agent-protocol frame, not just forward raw byte chunks).
