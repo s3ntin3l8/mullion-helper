@@ -17,9 +17,13 @@ for the fuller picture (layout, conventions).
 - **Before pushing, run the full gate:** `make lint && make test && make
   build`. No `typecheck`/`format-check` targets — `cargo fmt --check`/`cargo
   clippy` cover both roles for Rust.
-- **Get a review, and close the loop on it.** Request a Hermes review
-  (`@s3ntin3l8-hermes Review` on the PR, or `make review`). Fixing the code is
-  not enough to address feedback — reply to each inline comment via the
+- **Get a review, and close the loop on it.** Hermes reviews automatically
+  on open (`.github/workflows/hermes.yml`'s `auto-review` job) — don't also
+  `@s3ntin3l8-hermes Review` right after opening the PR, or you'll trigger a
+  redundant second review. A re-review can be requested the same way
+  (`@s3ntin3l8-hermes Review` on the PR) after pushing fixes, but keep it
+  to a couple of rounds — don't loop on it indefinitely. Fixing the code
+  is not enough to address feedback — reply to each inline comment via the
   GitHub API, then resolve the thread via the GraphQL `resolveReviewThread`
   mutation.
 - **Run a review pass on your own diff before declaring done.**
