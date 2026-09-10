@@ -35,8 +35,3 @@ jobs:
       build-script: "ci:prepare"
       matrix-os: '["windows-latest","macos-14"]'
     secrets: inherit # pragma: allowlist secret
-
-  dependency-review:
-    permissions:
-      contents: read
-    uses: s3ntin3l8/.github/.github/workflows/dependency-review.yml@main
