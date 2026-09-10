@@ -13,3 +13,10 @@
 
 # Editor/OS cruft
 .DS_Store
+
+# Mullion-managed git worktrees (see mullion-session-manager's .gitignore)
+.wt/
+
+# Local Superpowers plan/spec scratch files (see traefik-viewer's,
+# aerie-media-dashboard's, and runway-ai-usage-tracker's .gitignore)
+docs/superpowers/
