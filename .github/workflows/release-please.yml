@@ -84,7 +84,9 @@ jobs:
         include:
           - os: macos-14
             label: macOS Apple Silicon DMG
-            bundles: dmg
+            # The updater archive is generated from the macOS app bundle; a
+            # DMG-only build explicitly skips updater artifacts.
+            bundles: app,dmg
           - os: windows-latest
             label: Windows x64 NSIS
             bundles: nsis
