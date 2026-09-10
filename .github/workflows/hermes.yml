@@ -87,12 +87,22 @@ jobs:
     # All `read`: the reusable never writes via GITHUB_TOKEN -- every GitHub
     # write (the review itself, comments, checks) goes through its own App
     # token, minted from HERMES_APP_ID/HERMES_APP_PRIVATE_KEY. GITHUB_TOKEN
-    # is only used read-only, to check out the shared prompt repo.
+    # is only used read-only, to check out the shared prompt repo (contents
+    # only) -- pull-requests/issues/checks: read aren't load-bearing either,
+    # kept as harmless future-proofing rather than a requirement.
     permissions:
       contents: read
       pull-requests: read
       issues: read
       checks: read
+    # Serialize against on-demand-review for the same PR: the reusable's
+    # re-trigger guard only skips a run once a review is already POSTED, so
+    # an `opened` auto-review and a same-minute "@mention" can otherwise both
+    # get dispatched concurrently. Shared group name with on-demand-review
+    # below queues them instead of letting them overlap.
+    concurrency:
+      group: hermes-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: false
     uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@main
     with:
       mode: auto # review on trigger, no @mention needed
@@ -115,6 +125,11 @@ jobs:
       pull-requests: read
       issues: read
       checks: read
+    # Same concurrency group as auto-review above -- queues instead of
+    # overlapping when both can target the same PR.
+    concurrency:
+      group: hermes-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: false
     uses: s3ntin3l8/.github/.github/workflows/hermes-review.yml@main
     with:
       mention-trigger: s3ntin3l8-hermes # mode: on-demand is the reusable workflow's default
