@@ -15,7 +15,8 @@
     "ci:prepare": "npm run stage:sidecar && npm run build",
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.app.json && tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.worker.json",
-    "lint": "eslint ."
+    "lint": "eslint . && npm run check:versions",
+    "check:versions": "node scripts/check-version-consistency.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",
