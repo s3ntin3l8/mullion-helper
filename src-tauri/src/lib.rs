@@ -57,8 +57,8 @@ struct UpdateResult {
 
 #[tauri::command]
 async fn check_for_updates(app: tauri::AppHandle) -> Result<UpdateResult, String> {
-    let update = app
-        .updater()
+    let update = updater_builder(&app)
+        .build()
         .map_err(|error| error.to_string())?
         .check()
         .await
@@ -71,8 +71,8 @@ async fn check_for_updates(app: tauri::AppHandle) -> Result<UpdateResult, String
 
 #[tauri::command]
 async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
-    let update = app
-        .updater()
+    let update = updater_builder(&app)
+        .build()
         .map_err(|error| error.to_string())?
         .check()
         .await
@@ -83,6 +83,25 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
         .await
         .map_err(|error| error.to_string())?;
     app.restart();
+}
+
+fn updater_builder(app: &tauri::AppHandle) -> tauri_plugin_updater::UpdaterBuilder {
+    let builder = app.updater_builder();
+    #[cfg(windows)]
+    {
+        let app = app.clone();
+        return builder.on_before_exit(move || {
+            if let Some(tray_status) = app.try_state::<tray_status::TrayStatus>() {
+                tray_status.shutdown_for_update();
+            }
+            if let Some(supervisor) = app.try_state::<Supervisor>() {
+                supervisor.shutdown_for_update();
+            }
+            app.cleanup_before_exit();
+        });
+    }
+    #[cfg(not(windows))]
+    builder
 }
 
 fn show_main(app: &tauri::AppHandle) {
@@ -201,7 +220,7 @@ pub fn run() {
             app.manage(tray_status.clone());
             tray_status.update(&initial_status);
             tray_status.launch();
-            supervisor.clone().launch();
+            supervisor.launch();
             if should_start {
                 supervisor.start();
             }
@@ -217,12 +236,43 @@ pub fn run() {
 
     builder.run(|app, event| {
         if matches!(event, RunEvent::Exit | RunEvent::ExitRequested { .. }) {
-            if let Some(supervisor) = app.try_state::<Supervisor>() {
-                supervisor.shutdown();
-            }
             if let Some(tray_status) = app.try_state::<tray_status::TrayStatus>() {
                 tray_status.shutdown();
             }
+            if let Some(supervisor) = app.try_state::<Supervisor>() {
+                supervisor.shutdown();
+            }
         }
     });
+}
+
+#[cfg(test)]
+mod installer_tests {
+    use serde_json::Value;
+
+    #[test]
+    fn nsis_preinstall_hook_targets_the_bundled_worker() {
+        let config: Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_eq!(
+            config.pointer("/bundle/windows/nsis/installerHooks"),
+            Some(&Value::String("nsis/installer-hooks.nsh".into()))
+        );
+        assert_eq!(
+            config.pointer("/bundle/externalBin/0"),
+            Some(&Value::String("binaries/mullion-bridge-worker".into()))
+        );
+
+        let hook = include_str!("../nsis/installer-hooks.nsh");
+        let process_checks: Vec<_> = hook
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with("!insertmacro CheckIfAppIsRunning"))
+            .collect();
+        assert_eq!(
+            process_checks,
+            [
+                r#"!insertmacro CheckIfAppIsRunning "mullion-bridge-worker.exe" "Mullion Bridge Worker""#
+            ]
+        );
+    }
 }

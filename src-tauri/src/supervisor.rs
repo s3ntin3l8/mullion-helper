@@ -6,15 +6,15 @@ use std::{
     env, fs,
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
-    thread,
+    thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, Runtime, Wry};
 
 const WINDOWS_AGENT_PIPE: &str = r"\\.\pipe\openssh-ssh-agent";
 const HEALTHY_CONNECTION_RESET_AFTER: Duration = Duration::from_secs(30);
@@ -70,23 +70,30 @@ struct Inspection {
     bridge_id: Option<String>,
 }
 
-struct Inner {
-    app: AppHandle,
+struct Inner<R: Runtime> {
+    app: AppHandle<R>,
     worker: PathBuf,
     data_dir: PathBuf,
     desired: AtomicBool,
     shutdown: AtomicBool,
     child: Mutex<Option<Child>>,
+    thread: Mutex<Option<JoinHandle<()>>>,
+    blocking_shutdown: Mutex<()>,
     status: Mutex<BridgeStatus>,
     settings: Mutex<Settings>,
     connected_at: Mutex<Option<Instant>>,
 }
 
-#[derive(Clone)]
-pub struct Supervisor(Arc<Inner>);
+pub struct Supervisor<R: Runtime = Wry>(Arc<Inner<R>>);
 
-impl Supervisor {
-    pub fn new(app: AppHandle, data_dir: PathBuf) -> Result<Self, String> {
+impl<R: Runtime> Clone for Supervisor<R> {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl<R: Runtime> Supervisor<R> {
+    pub fn new(app: AppHandle<R>, data_dir: PathBuf) -> Result<Self, String> {
         fs::create_dir_all(data_dir.join("worker")).map_err(|error| error.to_string())?;
         let settings = read_settings(&data_dir);
         Ok(Self(Arc::new(Inner {
@@ -96,14 +103,26 @@ impl Supervisor {
             desired: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
             child: Mutex::new(None),
+            thread: Mutex::new(None),
+            blocking_shutdown: Mutex::new(()),
             status: Mutex::new(BridgeStatus::new(BridgeState::Unpaired, None)),
             settings: Mutex::new(settings),
             connected_at: Mutex::new(None),
         })))
     }
 
-    pub fn launch(self) {
-        thread::spawn(move || self.run_loop());
+    pub fn launch(&self) {
+        let _shutdown = self
+            .0
+            .blocking_shutdown
+            .lock()
+            .expect("shutdown mutex poisoned");
+        if self.0.shutdown.load(Ordering::SeqCst) {
+            return;
+        }
+        let supervisor = self.clone();
+        let handle = thread::spawn(move || supervisor.run_loop());
+        *self.0.thread.lock().expect("thread mutex poisoned") = Some(handle);
     }
 
     pub fn status(&self) -> BridgeStatus {
@@ -126,7 +145,7 @@ impl Supervisor {
             .lock()
             .map_err(|_| "settings mutex poisoned")? = settings.clone();
         if self.0.desired.load(Ordering::SeqCst) {
-            self.kill_child();
+            self.stop_child();
         }
         Ok(settings)
     }
@@ -139,7 +158,7 @@ impl Supervisor {
 
     pub fn pause(&self) -> BridgeStatus {
         self.0.desired.store(false, Ordering::SeqCst);
-        self.kill_child();
+        self.stop_child();
         self.set_status(BridgeStatus::new(BridgeState::Paused, None));
         self.status()
     }
@@ -147,7 +166,20 @@ impl Supervisor {
     pub fn shutdown(&self) {
         self.0.shutdown.store(true, Ordering::SeqCst);
         self.0.desired.store(false, Ordering::SeqCst);
-        self.kill_child();
+        self.stop_child();
+    }
+
+    /// Stops every process owned by the supervisor and waits for the loop to
+    /// finish. The updater uses this before NSIS replaces the bundled worker.
+    #[cfg(any(windows, test))]
+    pub fn shutdown_for_update(&self) {
+        let _shutdown = self
+            .0
+            .blocking_shutdown
+            .lock()
+            .expect("shutdown mutex poisoned");
+        self.shutdown();
+        join_thread(&self.0.thread);
     }
 
     pub fn inspect(&self) -> Result<bool, String> {
@@ -159,7 +191,7 @@ impl Supervisor {
             return Err("The pairing payload is empty or too large.".into());
         }
         self.0.desired.store(false, Ordering::SeqCst);
-        self.kill_child();
+        self.stop_child();
         let settings = self.settings();
         let mut command = self.worker_command();
         command.args(["pair", "--payload-stdin", "--json"]);
@@ -285,7 +317,7 @@ impl Supervisor {
             loop {
                 if !self.0.desired.load(Ordering::SeqCst) || self.0.shutdown.load(Ordering::SeqCst)
                 {
-                    self.kill_child();
+                    self.stop_child();
                     break;
                 }
                 let exited = self
@@ -300,7 +332,7 @@ impl Supervisor {
                 }
                 thread::sleep(Duration::from_millis(200));
             }
-            *self.0.child.lock().expect("child mutex poisoned") = None;
+            self.reap_child();
             if self.0.desired.load(Ordering::SeqCst) && !self.0.shutdown.load(Ordering::SeqCst) {
                 let connected_at = self
                     .0
@@ -351,7 +383,7 @@ impl Supervisor {
                     {
                         if let Err(error) = migration.commit() {
                             self.0.desired.store(false, Ordering::SeqCst);
-                            self.kill_child();
+                            self.stop_child();
                             self.set_status(BridgeStatus::new(BridgeState::Error, Some(error)));
                         }
                     }
@@ -418,17 +450,17 @@ impl Supervisor {
         command
     }
 
-    fn kill_child(&self) {
-        if let Ok(mut guard) = self.0.child.lock() {
-            if let Some(child) = guard.as_mut() {
-                let _ = child.kill();
-            }
-        }
+    fn stop_child(&self) {
+        stop_child(&self.0.child);
+    }
+
+    fn reap_child(&self) {
+        reap_child(&self.0.child);
     }
 
     fn set_status(&self, status: BridgeStatus) {
         *self.0.status.lock().expect("status mutex poisoned") = status.clone();
-        if let Some(tray_status) = self.0.app.try_state::<TrayStatus>() {
+        if let Some(tray_status) = self.0.app.try_state::<TrayStatus<R>>() {
             tray_status.update(&status);
         }
         let _ = self.0.app.emit("bridge-status", status);
@@ -444,6 +476,28 @@ impl Supervisor {
             thread::sleep(step);
             remaining -= step;
         }
+    }
+}
+
+fn stop_child(child: &Mutex<Option<Child>>) -> Option<ExitStatus> {
+    let mut child = child.lock().expect("child mutex poisoned").take()?;
+    let _ = child.kill();
+    child.wait().ok()
+}
+
+fn reap_child(child: &Mutex<Option<Child>>) -> Option<ExitStatus> {
+    child
+        .lock()
+        .expect("child mutex poisoned")
+        .take()?
+        .wait()
+        .ok()
+}
+
+#[cfg(any(windows, test))]
+fn join_thread(thread: &Mutex<Option<JoinHandle<()>>>) {
+    if let Some(handle) = thread.lock().expect("thread mutex poisoned").take() {
+        let _ = handle.join();
     }
 }
 
@@ -545,6 +599,78 @@ fn should_reset_backoff(connected_at: Option<Instant>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore]
+    fn child_process_fixture() {
+        if env::var_os("MULLION_CHILD_PROCESS_FIXTURE").is_some() {
+            thread::sleep(Duration::from_secs(60));
+        }
+    }
+
+    fn sleeping_child() -> Child {
+        Command::new(env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "supervisor::tests::child_process_fixture",
+            ])
+            .env("MULLION_CHILD_PROCESS_FIXTURE", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    #[test]
+    fn stopping_a_child_synchronously_reaps_it() {
+        let child = Mutex::new(Some(sleeping_child()));
+
+        let status = stop_child(&child).expect("child should be stopped and reaped");
+
+        assert!(!status.success());
+        assert!(child.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn updater_shutdown_is_idempotent() {
+        let app = tauri::test::mock_app();
+        let data_dir = test_data_dir("idempotent");
+        let supervisor = Supervisor::new(app.handle().clone(), data_dir.clone()).unwrap();
+        supervisor.launch();
+
+        supervisor.shutdown_for_update();
+        supervisor.shutdown_for_update();
+
+        assert!(supervisor.0.shutdown.load(Ordering::SeqCst));
+        assert!(supervisor.0.thread.lock().unwrap().is_none());
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn blocking_shutdown_terminates_the_real_supervisor_loop() {
+        let app = tauri::test::mock_app();
+        let data_dir = test_data_dir("loop-termination");
+        let supervisor = Supervisor::new(app.handle().clone(), data_dir.clone()).unwrap();
+        supervisor.launch();
+        assert!(supervisor.0.thread.lock().unwrap().is_some());
+
+        supervisor.shutdown_for_update();
+
+        assert!(supervisor.0.thread.lock().unwrap().is_none());
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
+    fn test_data_dir(name: &str) -> PathBuf {
+        let path = env::temp_dir().join(format!(
+            "mullion-helper-supervisor-{name}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&path);
+        path
+    }
+
     #[test]
     fn explicit_socket_wins() {
         let settings = Settings {
