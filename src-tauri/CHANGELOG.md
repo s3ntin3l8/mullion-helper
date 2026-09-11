@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.6](https://github.com/s3ntin3l8/mullion-helper/compare/v0.1.5...v0.1.6) (2026-09-11)
+
+
+### Bug Fixes
+
+* unblock Windows updates and strengthen tray pulse ([#32](https://github.com/s3ntin3l8/mullion-helper/issues/32)) ([8171cbc](https://github.com/s3ntin3l8/mullion-helper/commit/8171cbc5b72f8043ed205f2781ad7d475bbc5ed1))
+
 ## [0.1.5](https://github.com/s3ntin3l8/mullion-helper/compare/v0.1.4...v0.1.5) (2026-09-11)
 
 
