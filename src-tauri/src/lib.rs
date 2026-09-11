@@ -1,10 +1,12 @@
+mod headless_process;
 mod migration;
 mod supervisor;
+mod tray_status;
 
 use serde::Serialize;
 use supervisor::{BridgeStatus, Settings, Supervisor};
 use tauri::{
-    menu::{Menu, MenuItem},
+    menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, RunEvent, WindowEvent,
 };
@@ -136,25 +138,36 @@ pub fn run() {
                 pending_migration,
             )));
             app.manage(supervisor.clone());
-            supervisor.clone().launch();
-            if should_start {
-                supervisor.start();
-            }
             let launched_in_background =
                 std::env::args().any(|argument| argument == "--background");
 
+            let initial_status = supervisor.status();
+            let status_item =
+                MenuItem::with_id(app, "status", "Status: Ready to pair", false, None::<&str>)?;
+            let separator = PredefinedMenuItem::separator(app)?;
             let open_item =
                 MenuItem::with_id(app, "open", "Open Mullion Helper", true, None::<&str>)?;
             let toggle_item =
                 MenuItem::with_id(app, "toggle", "Pause / Resume Bridge", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open_item, &toggle_item, &quit_item])?;
+            let menu = Menu::with_items(
+                app,
+                &[
+                    &status_item,
+                    &separator,
+                    &open_item,
+                    &toggle_item,
+                    &quit_item,
+                ],
+            )?;
+            let tray_status =
+                tray_status::TrayStatus::new(app.handle().clone(), status_item, &initial_status);
 
-            TrayIconBuilder::new()
-                .icon(app.default_window_icon().unwrap().clone())
+            TrayIconBuilder::with_id(tray_status::TRAY_ID)
+                .icon(tray_status.initial_icon())
                 .menu(&menu)
                 .show_menu_on_left_click(false)
-                .tooltip("Mullion Helper")
+                .tooltip("Mullion Helper — Ready to pair")
                 .on_tray_icon_event(|tray, event| {
                     if matches!(
                         event,
@@ -185,6 +198,14 @@ pub fn run() {
                 })
                 .build(app)?;
 
+            app.manage(tray_status.clone());
+            tray_status.update(&initial_status);
+            tray_status.launch();
+            supervisor.clone().launch();
+            if should_start {
+                supervisor.start();
+            }
+
             if !launched_in_background {
                 show_main(app.handle());
             }
@@ -198,6 +219,9 @@ pub fn run() {
         if matches!(event, RunEvent::Exit | RunEvent::ExitRequested { .. }) {
             if let Some(supervisor) = app.try_state::<Supervisor>() {
                 supervisor.shutdown();
+            }
+            if let Some(tray_status) = app.try_state::<tray_status::TrayStatus>() {
+                tray_status.shutdown();
             }
         }
     });

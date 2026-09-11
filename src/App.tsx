@@ -2,8 +2,16 @@ import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { api } from "./api";
-import logo from "./logo.svg";
 import type { BridgeStatus, Settings } from "./types";
+
+function BrandMark() {
+  return <svg className="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+    <rect fill="#11211a" x="1" y="1" width="13.5" height="13.5" rx="2" />
+    <rect fill="#11211a" x="17.5" y="1" width="13.5" height="13.5" rx="2" />
+    <rect fill="#11211a" x="1" y="17.5" width="13.5" height="13.5" rx="2" />
+    <rect fill="#0e9f6e" x="17.5" y="17.5" width="13.5" height="13.5" rx="2" />
+  </svg>;
+}
 
 const labels: Record<BridgeStatus["state"], string> = {
   unpaired: "Ready to pair", starting: "Starting bridge…", connected: "Bridge connected",
@@ -79,7 +87,7 @@ export function App() {
   const running = status && !["paused", "unpaired", "needs_pairing", "error"].includes(status.state);
   const needsPairing = status && ["unpaired", "needs_pairing"].includes(status.state);
   return <main className="shell">
-    <header><img src={logo} alt="" /><div><h1>Mullion Helper</h1><p>Your local SSH-agent bridge</p></div></header>
+    <header><BrandMark /><div><h1>Mullion Helper</h1><p>Your local SSH-agent bridge</p></div></header>
     <section className="status-card" aria-live="polite">
       <span className={`orb ${status?.state ?? "starting"}`} />
       <div className="status-copy"><strong>{status ? labels[status.state] : "Loading…"}</strong><span>{status?.detail ?? (connected ? "Your SSH agent is available to Mullion sessions." : "The tray icon keeps the bridge available in the background.")}</span>{status?.base_url && <small>{status.base_url}</small>}</div>

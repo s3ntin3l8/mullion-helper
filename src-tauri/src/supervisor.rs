@@ -1,4 +1,4 @@
-use crate::migration::MigrationState;
+use crate::{headless_process, migration::MigrationState, tray_status::TrayStatus};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -413,7 +413,7 @@ impl Supervisor {
     }
 
     fn worker_command(&self) -> Command {
-        let mut command = Command::new(&self.0.worker);
+        let mut command = headless_process::command(&self.0.worker);
         command.env("MULLION_HELPER_STATE_DIR", self.0.data_dir.join("worker"));
         command
     }
@@ -428,6 +428,9 @@ impl Supervisor {
 
     fn set_status(&self, status: BridgeStatus) {
         *self.0.status.lock().expect("status mutex poisoned") = status.clone();
+        if let Some(tray_status) = self.0.app.try_state::<TrayStatus>() {
+            tray_status.update(&status);
+        }
         let _ = self.0.app.emit("bridge-status", status);
     }
 
