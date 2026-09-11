@@ -1,6 +1,6 @@
-use serde_json::Value;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-use std::process::Command;
+use crate::headless_process;
+use serde_json::Value;
 use std::{env, fs, path::PathBuf, sync::Mutex};
 
 pub struct MigrationState(pub Mutex<Option<PendingMigration>>);
@@ -134,13 +134,13 @@ fn legacy_credential_path() -> Option<PathBuf> {
 #[cfg(target_os = "macos")]
 fn disable_legacy_service() -> Result<(), String> {
     let label = "de.s3ntin3l8.mullion-helper";
-    if let Ok(output) = Command::new("id").arg("-u").output() {
+    if let Ok(output) = headless_process::command("id").arg("-u").output() {
         if let Ok(uid) = String::from_utf8(output.stdout) {
             let domain = format!("gui/{}", uid.trim());
-            let _ = Command::new("launchctl")
+            let _ = headless_process::command("launchctl")
                 .args(["bootout", &format!("{domain}/{label}")])
                 .status();
-            let status = Command::new("launchctl")
+            let status = headless_process::command("launchctl")
                 .args(["disable", &format!("{domain}/{label}")])
                 .status()
                 .map_err(|error| format!("could not disable the legacy launchd job: {error}"))?;
@@ -155,11 +155,11 @@ fn disable_legacy_service() -> Result<(), String> {
 #[cfg(target_os = "windows")]
 fn disable_legacy_service() -> Result<(), String> {
     let key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
-    let query = Command::new("reg")
+    let query = headless_process::command("reg")
         .args(["query", key, "/v", "MullionHelper"])
         .status();
     if query.is_ok_and(|status| status.success()) {
-        let deleted = Command::new("reg")
+        let deleted = headless_process::command("reg")
             .args(["delete", key, "/v", "MullionHelper", "/f"])
             .status()
             .map_err(|error| format!("could not disable the legacy Run entry: {error}"))?;
@@ -193,7 +193,7 @@ foreach ($target in $targets) {
   if ($result.ReturnValue -ne 0) { exit 1 }
 }
 "#;
-    let status = Command::new("powershell.exe")
+    let status = headless_process::command("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .arg(&legacy_executable)
         .arg(std::process::id().to_string())

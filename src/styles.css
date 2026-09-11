@@ -6,7 +6,7 @@ button { border: 0; border-radius: 10px; padding: 10px 16px; background: #0e9f6e
 button:hover { background: #0b855c; } button:disabled { opacity: .48; cursor: default; }
 button.secondary { background: #e4eee8; color: #174b38; } button.link { padding: 0; color: #087650; background: none; }
 .shell { width: min(100%, 680px); margin: 0 auto; padding: 34px; }
-header { display: flex; align-items: center; gap: 14px; margin-bottom: 28px; } header img { width: 45px; height: 45px; } h1, h2, p { margin: 0; }
+header { display: flex; align-items: center; gap: 14px; margin-bottom: 28px; } .brand-mark { width: 45px; height: 45px; flex: none; } h1, h2, p { margin: 0; }
 header h1 { font-size: 20px; letter-spacing: -.02em; } header p { color: #66746c; margin-top: 3px; font-size: 13px; }
 .status-card, .panel { background: rgba(255,255,255,.86); border: 1px solid #dce7e0; border-radius: 18px; box-shadow: 0 12px 36px rgba(17,33,26,.07); }
 .status-card { display: flex; align-items: center; gap: 14px; padding: 20px; margin-bottom: 18px; }
