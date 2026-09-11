@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.5](https://github.com/s3ntin3l8/mullion-helper/compare/v0.1.4...v0.1.5) (2026-09-11)
+
+
+### Bug Fixes
+
+* hide Windows worker and show tray status ([#28](https://github.com/s3ntin3l8/mullion-helper/issues/28)) ([fda3e00](https://github.com/s3ntin3l8/mullion-helper/commit/fda3e00ef9fbb4fa529aa55fa5ddbfd8d95be4db))
+
 ## [0.1.4](https://github.com/s3ntin3l8/mullion-helper/compare/v0.1.3...v0.1.4) (2026-09-10)
 
 
