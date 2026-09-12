@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.7](https://github.com/s3ntin3l8/mullion-helper/compare/v0.1.6...v0.1.7) (2026-09-12)
+
+
+### Bug Fixes
+
+* log worker failures to disk and make pairing errors readable ([c5ee7f0](https://github.com/s3ntin3l8/mullion-helper/commit/c5ee7f0e4ebca17adb75369dab8572cd5e3c78c5))
+* raise the bridge worker log's rotation budget ([ff66f6f](https://github.com/s3ntin3l8/mullion-helper/commit/ff66f6fe85397cc43f48af479ce38ae107984412))
+* sign macOS worker sidecar with JIT entitlement ([d2a8bbe](https://github.com/s3ntin3l8/mullion-helper/commit/d2a8bbef12d070ba80e42229c320a7d5c7cb3f2c))
+
 ## [0.1.6](https://github.com/s3ntin3l8/mullion-helper/compare/v0.1.5...v0.1.6) (2026-09-11)
 
 
