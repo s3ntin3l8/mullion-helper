@@ -55,7 +55,14 @@ fn pair_bridge(
 fn diagnostics_path(app: tauri::AppHandle) -> Result<String, String> {
     app.path()
         .app_log_dir()
-        .map(|path| path.display().to_string())
+        // tauri_plugin_log's TargetKind::LogDir { file_name: None } (see the
+        // plugin registration below) names the file after
+        // `package_info().name`, i.e. Cargo.toml's package name — not the
+        // "Mullion Helper" productName. Kept as a literal here rather than
+        // read back from the app handle since there's no public API for it;
+        // if the package is ever renamed, `check:versions` won't catch a
+        // drift here, so update this alongside `[package] name` in Cargo.toml.
+        .map(|dir| dir.join("mullion-helper.log").display().to_string())
         .map_err(|error| error.to_string())
 }
 

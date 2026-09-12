@@ -389,13 +389,18 @@ impl<R: Runtime> Supervisor<R> {
                     }
                 }
             }
-            Some("disconnected") | Some("connect_failed") => {
+            Some(event_type @ ("disconnected" | "connect_failed")) => {
+                let message = event.get("message").and_then(Value::as_str);
+                // Same "log before it can be dropped" discipline as
+                // handle_stderr: `detail` here is neither truncated nor
+                // state-gated today, but it IS ephemeral (overwritten by the
+                // next status update) and never persisted anywhere else.
+                if let Some(message) = message {
+                    log::warn!("worker reported {event_type}: {message}");
+                }
                 let mut status = self.status();
                 status.state = BridgeState::Reconnecting;
-                status.detail = event
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
+                status.detail = message.map(str::to_owned);
                 status.updated_at = Utc::now().to_rfc3339();
                 self.set_status(status);
             }
