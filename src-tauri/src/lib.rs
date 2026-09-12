@@ -11,6 +11,8 @@ use tauri::{
     Manager, RunEvent, WindowEvent,
 };
 use tauri_plugin_autostart::MacosLauncher;
+use tauri_plugin_log::{Target, TargetKind};
+use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_updater::UpdaterExt;
 
 #[tauri::command]
@@ -47,6 +49,21 @@ fn pair_bridge(
     supervisor: tauri::State<'_, Supervisor>,
 ) -> Result<BridgeStatus, String> {
     supervisor.pair(&payload)
+}
+
+#[tauri::command]
+fn diagnostics_path(app: tauri::AppHandle) -> Result<String, String> {
+    app.path()
+        .app_log_dir()
+        // tauri_plugin_log's TargetKind::LogDir { file_name: None } (see the
+        // plugin registration below) names the file after
+        // `package_info().name`, i.e. Cargo.toml's package name — not the
+        // "Mullion Helper" productName. Kept as a literal here rather than
+        // read back from the app handle since there's no public API for it;
+        // if the package is ever renamed, `check:versions` won't catch a
+        // drift here, so update this alongside `[package] name` in Cargo.toml.
+        .map(|dir| dir.join("mullion-helper.log").display().to_string())
+        .map_err(|error| error.to_string())
 }
 
 #[derive(Serialize)]
@@ -115,6 +132,19 @@ fn show_main(app: &tauri::AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default()
+        // First in the chain: this is the app's only logging facility, and
+        // registering it early means every plugin/setup step after this one
+        // can log through it too.
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .targets([
+                    Target::new(TargetKind::LogDir { file_name: None }),
+                    #[cfg(debug_assertions)]
+                    Target::new(TargetKind::Stdout),
+                ])
+                .build(),
+        )
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             show_main(app)
         }))
@@ -130,6 +160,7 @@ pub fn run() {
             start_bridge,
             pause_bridge,
             pair_bridge,
+            diagnostics_path,
             check_for_updates,
             install_update
         ])
@@ -168,6 +199,8 @@ pub fn run() {
                 MenuItem::with_id(app, "open", "Open Mullion Helper", true, None::<&str>)?;
             let toggle_item =
                 MenuItem::with_id(app, "toggle", "Pause / Resume Bridge", true, None::<&str>)?;
+            let open_logs_item =
+                MenuItem::with_id(app, "open_logs", "Open Logs", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(
                 app,
@@ -176,6 +209,7 @@ pub fn run() {
                     &separator,
                     &open_item,
                     &toggle_item,
+                    &open_logs_item,
                     &quit_item,
                 ],
             )?;
@@ -207,6 +241,13 @@ pub fn run() {
                             supervisor.start();
                         } else {
                             supervisor.pause();
+                        }
+                    }
+                    "open_logs" => {
+                        if let Ok(log_dir) = app.path().app_log_dir() {
+                            let _ = app
+                                .opener()
+                                .open_path(log_dir.display().to_string(), None::<&str>);
                         }
                     }
                     "quit" => {

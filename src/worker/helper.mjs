@@ -260,7 +260,18 @@ function handshake(ws, message) {
       if (parsed?.type !== "ready") {
         settled = true;
         cleanup();
-        reject(new Error(`unexpected handshake reply: ${JSON.stringify(parsed)}`));
+        // Deliberately NOT echoing `parsed` itself, unlike an early version
+        // of this rejection: this branch fires on ANY reply shape the
+        // server sends that isn't a recognized "error" or "ready", which
+        // includes a misbehaving or compromised server, and this text now
+        // flows unconditionally into a persisted, easily-copied log file
+        // (Supervisor::handle_stderr) and the "Copy details" pairing-UI
+        // button — reporting only the reply's own `type` field matches the
+        // discipline runPair's own reply-shape check already applies
+        // (`unexpected handshake reply shape from ${baseUrl} — refusing to
+        // persist it`, below), which never echoes the reply body either.
+        const replyType = typeof parsed?.type === "string" ? parsed.type : "unknown";
+        reject(new Error(`unexpected handshake reply type: ${replyType}`));
         return;
       }
       settled = true;

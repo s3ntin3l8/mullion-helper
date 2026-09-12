@@ -14,4 +14,5 @@ export const api = {
   saveSettings: (settings: Settings) => invoke<Settings>("save_settings", { settings }),
   checkForUpdates: () => invoke<UpdateResult>("check_for_updates"),
   installUpdate: () => invoke<void>("install_update"),
+  diagnosticsPath: () => inTauri ? invoke<string>("diagnostics_path") : Promise.resolve(null),
 };
