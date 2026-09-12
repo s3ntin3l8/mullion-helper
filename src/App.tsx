@@ -2,7 +2,18 @@ import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { api } from "./api";
-import type { BridgeStatus, Settings } from "./types";
+import type { BridgeStatus, Notice, Settings } from "./types";
+
+function errorNotice(raw: string): Notice {
+  const text = raw.trim();
+  const breakAt = text.indexOf("\n");
+  return breakAt === -1
+    ? { kind: "error", summary: text }
+    : { kind: "error", summary: text.slice(0, breakAt).trim(), details: text.slice(breakAt + 1).trim() };
+}
+function infoNotice(summary: string): Notice {
+  return { kind: "info", summary };
+}
 
 function BrandMark() {
   return <svg className="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
@@ -24,8 +35,10 @@ export function App() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [payload, setPayload] = useState("");
   const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<Notice | null>(null);
   const [updateVersion, setUpdateVersion] = useState<string | null>(null);
+  const [diagnosticsPath, setDiagnosticsPath] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
   const refresh = useCallback(async () => {
     const [nextStatus, nextSettings] = await Promise.all([api.status(), api.settings()]);
     if (api.isDesktop) nextSettings.launch_at_login = await isEnabled();
@@ -33,12 +46,16 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    void refresh().catch((error: unknown) => setNotice(String(error)));
+    void refresh().catch((error: unknown) => setNotice(errorNotice(String(error))));
     if (!api.isDesktop) return;
     let unlisten = () => {};
     void listen<BridgeStatus>("bridge-status", (event) => setStatus(event.payload)).then((fn) => { unlisten = fn; });
     return () => unlisten();
   }, [refresh]);
+
+  useEffect(() => {
+    void api.diagnosticsPath().then(setDiagnosticsPath).catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (!api.isDesktop) return;
@@ -50,9 +67,16 @@ export function App() {
     return () => { window.clearTimeout(initial); window.clearInterval(daily); };
   }, []);
 
+  async function copyDetails(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch { /* clipboard unavailable; the text is still selectable in the details block */ }
+  }
   async function act(operation: () => Promise<BridgeStatus>) {
     setBusy(true); setNotice(null);
-    try { setStatus(await operation()); } catch (error) { setNotice(String(error)); }
+    try { setStatus(await operation()); } catch (error) { setNotice(errorNotice(String(error))); }
     finally { setBusy(false); }
   }
   async function pair() {
@@ -71,16 +95,16 @@ export function App() {
         if (settings.launch_at_login) await enable(); else await disable();
       }
       setSettings(await api.saveSettings(settings));
-      setNotice("Settings saved. The bridge was restarted with the new configuration.");
-    } catch (error) { setNotice(String(error)); } finally { setBusy(false); }
+      setNotice(infoNotice("Settings saved. The bridge was restarted with the new configuration."));
+    } catch (error) { setNotice(errorNotice(String(error))); } finally { setBusy(false); }
   }
   async function checkUpdates() {
     setBusy(true);
     try {
       const result = await api.checkForUpdates();
       setUpdateVersion(result.available ? result.version : null);
-      setNotice(result.available ? `Version ${result.version} is available.` : "Mullion Helper is up to date.");
-    } catch (error) { setNotice(String(error)); } finally { setBusy(false); }
+      setNotice(infoNotice(result.available ? `Version ${result.version} is available.` : "Mullion Helper is up to date."));
+    } catch (error) { setNotice(errorNotice(String(error))); } finally { setBusy(false); }
   }
 
   const connected = status?.state === "connected";
@@ -95,8 +119,20 @@ export function App() {
     </section>
     {needsPairing && <section className="panel onboarding"><span className="eyebrow">First-time setup</span><h2>Connect this computer</h2><p>In Mullion, open Settings → Hosts → SSH agent bridges, create a pairing code, then paste the payload below.</p><label>Pairing payload<textarea value={payload} onChange={(event) => setPayload(event.target.value)} placeholder="Paste pairing payload" rows={3} /></label><button disabled={busy || !payload.trim()} onClick={() => void pair()}>{busy ? "Pairing…" : "Pair and start"}</button></section>}
     {!needsPairing && settings && <section className="panel"><span className="eyebrow">Configuration</span><h2>Settings</h2><label>SSH agent socket<input value={settings.ssh_auth_sock} onChange={(event) => setSettings({ ...settings, ssh_auth_sock: event.target.value })} placeholder="Auto-detect" /></label><p className="hint">Leave blank to detect SSH_AUTH_SOCK, 1Password, or the Windows OpenSSH-compatible pipe.</p><label className="toggle"><input type="checkbox" checked={settings.launch_at_login} onChange={(event) => setSettings({ ...settings, launch_at_login: event.target.checked })} /><span>Launch at login</span></label><label className="toggle"><input type="checkbox" checked={settings.insecure} onChange={(event) => setSettings({ ...settings, insecure: event.target.checked })} /><span>Allow self-signed TLS certificates</span></label><button disabled={busy} onClick={() => void save()}>Save settings</button></section>}
-    {updateVersion && <section className="update"><div><strong>Mullion Helper {updateVersion} is available</strong><span>The app will restart after installing.</span></div><button disabled={busy} onClick={() => { setBusy(true); void api.installUpdate().catch((error) => { setNotice(String(error)); setBusy(false); }); }}>Install update</button></section>}
-    {notice && <p className="notice" role="status">{notice}</p>}
+    {updateVersion && <section className="update"><div><strong>Mullion Helper {updateVersion} is available</strong><span>The app will restart after installing.</span></div><button disabled={busy} onClick={() => { setBusy(true); void api.installUpdate().catch((error) => { setNotice(errorNotice(String(error))); setBusy(false); }); }}>Install update</button></section>}
+    {notice && (notice.kind === "error"
+      ? <section className="notice notice-error" role="alert">
+          <p>{notice.summary}</p>
+          {notice.details && <details>
+            <summary>Show details</summary>
+            <pre>{notice.details}</pre>
+            <div className="notice-actions">
+              <button type="button" className="link" onClick={() => void copyDetails(notice.details ?? "")}>{copied ? "Copied" : "Copy details"}</button>
+              {diagnosticsPath && <span className="hint">Full log: {diagnosticsPath}</span>}
+            </div>
+          </details>}
+        </section>
+      : <p className="notice" role="status">{notice.summary}</p>)}
     <footer><button className="link" disabled={busy} onClick={() => void checkUpdates()}>Check for updates</button><span>Closing this window keeps the tray app running.</span></footer>
   </main>;
 }

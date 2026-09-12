@@ -399,7 +399,14 @@ impl<R: Runtime> Supervisor<R> {
                 status.updated_at = Utc::now().to_rfc3339();
                 self.set_status(status);
             }
-            Some("dead_credential") | Some("renewal_rejected") => {
+            Some(event_type @ ("dead_credential" | "renewal_rejected")) => {
+                // The worker's own `message` is replaced with fixed prose below
+                // (it's written for a log, not a user), but it's still logged
+                // here so a report of "pairing required again" has something
+                // to look at instead of nothing.
+                if let Some(message) = event.get("message").and_then(Value::as_str) {
+                    log::warn!("worker reported {event_type}: {message}");
+                }
                 self.0.desired.store(false, Ordering::SeqCst);
                 self.set_status(BridgeStatus::new(
                     BridgeState::NeedsPairing,
@@ -414,10 +421,17 @@ impl<R: Runtime> Supervisor<R> {
     }
 
     fn handle_stderr(&self, line: &str) {
-        let detail: String = line.trim().chars().take(500).collect();
-        if detail.is_empty() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
             return;
         }
+        // Logged in full and unconditionally, BEFORE the state gate below —
+        // the UI-facing `detail` field is capped at 500 chars and dropped
+        // entirely outside Starting/Connected/Reconnecting, which is exactly
+        // when a user is most likely staring at the tray wondering why. The
+        // log is the only place this text survives in those states.
+        log::warn!("worker: {trimmed}");
+        let detail: String = trimmed.chars().take(500).collect();
         let mut status = self.0.status.lock().expect("status mutex poisoned");
         if matches!(
             status.state,
@@ -583,12 +597,23 @@ fn worker_path() -> Result<PathBuf, String> {
     }
 }
 
+// Cap on what this returns to the UI, not on what's logged: a runaway
+// stderr (e.g. a repeated panic loop) shouldn't be able to balloon the
+// pairing window, but the full text is still worth having in the log file.
+const WORKER_ERROR_DISPLAY_LIMIT: usize = 4000;
+
 fn clean_worker_error(stderr: &[u8]) -> String {
     let value = String::from_utf8_lossy(stderr).trim().to_owned();
     if value.is_empty() {
-        "The bundled bridge worker failed without an error message".into()
-    } else {
+        return "The bundled bridge worker failed without an error message".into();
+    }
+    log::error!("worker failed: {value}");
+    if value.chars().count() <= WORKER_ERROR_DISPLAY_LIMIT {
         value
+    } else {
+        let mut truncated: String = value.chars().take(WORKER_ERROR_DISPLAY_LIMIT).collect();
+        truncated.push_str("\n… (truncated, see log)");
+        truncated
     }
 }
 
@@ -697,5 +722,31 @@ mod tests {
         assert!(should_reset_backoff(Some(
             Instant::now() - HEALTHY_CONNECTION_RESET_AFTER
         )));
+    }
+
+    #[test]
+    fn clean_worker_error_falls_back_when_stderr_is_empty() {
+        assert_eq!(
+            clean_worker_error(b"   \n  "),
+            "The bundled bridge worker failed without an error message"
+        );
+    }
+
+    #[test]
+    fn clean_worker_error_passes_short_text_through_untouched() {
+        let stderr = b"line one\nline two\n";
+        assert_eq!(clean_worker_error(stderr), "line one\nline two");
+    }
+
+    #[test]
+    fn clean_worker_error_truncates_and_marks_long_output() {
+        let stderr = "x".repeat(WORKER_ERROR_DISPLAY_LIMIT + 500);
+        let cleaned = clean_worker_error(stderr.as_bytes());
+        assert!(cleaned.starts_with(&"x".repeat(WORKER_ERROR_DISPLAY_LIMIT)));
+        assert!(cleaned.ends_with("\n… (truncated, see log)"));
+        assert_eq!(
+            cleaned.chars().count(),
+            WORKER_ERROR_DISPLAY_LIMIT + "\n… (truncated, see log)".chars().count()
+        );
     }
 }
