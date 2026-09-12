@@ -116,3 +116,18 @@ jobs:
           tagName: ${{ needs.resolve-release.outputs.tag_name }}
           args: --bundles ${{ matrix.bundles }}
           updaterJsonPreferNsis: true
+      # This is the artifact users actually install, and the one that
+      # regressed in v0.1.6: the bundled sidecar crashed at V8 startup
+      # because it lacked com.apple.security.cs.allow-jit under Hardened
+      # Runtime. ci-cd.yml's frontend-and-worker job already checks the
+      # staged SEA before bundling; this checks Tauri's own re-sign of the
+      # nested binary survived bundling with the entitlement intact.
+      - name: Assert bundled macOS worker carries the JIT entitlement
+        if: matrix.os == 'macos-14'
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.app' | head -n1)"
+          worker="$app/Contents/MacOS/mullion-bridge-worker"
+          codesign -d --entitlements - "$worker" 2>&1 | tee /tmp/entitlements.txt
+          grep -q allow-jit /tmp/entitlements.txt

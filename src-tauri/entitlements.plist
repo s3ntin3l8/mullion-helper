@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    Required by the bundled mullion-bridge-worker sidecar (a Node.js Single
+    Executable Application). Without this, V8's Isolate::Init fails to
+    mmap(MAP_JIT) its JS code range under macOS's Hardened Runtime, and the
+    worker crashes at startup with:
+
+      # Fatal process out of memory: Failed to reserve virtual memory for CodeRange
+
+    despite the wording, that's not a heap-size problem, it's V8 being
+    denied executable memory. Node's own upstream macOS binary ships with
+    this same entitlement (nodejs/node tools/osx-entitlements.plist).
+
+    Applies to the whole app bundle, not just the sidecar, since Tauri signs
+    all nested binaries with this one file. Harmless for the main WebView
+    binary. Deliberately NOT copying Node's other entitlements
+    (get-task-allow is debug-only and notarization rejects it;
+    disable-executable-page-protection and disable-library-validation are
+    unnecessary and notarization-hostile): allow-jit is the one V8
+    actually needs.
+  -->
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+</dict>
+</plist>
