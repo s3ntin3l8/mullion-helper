@@ -40,7 +40,8 @@
     "longDescription": "Securely makes your local SSH agent available to your Mullion sessions.",
     "macOS": {
       "minimumSystemVersion": "13.5",
-      "signingIdentity": "-"
+      "signingIdentity": "-",
+      "entitlements": "entitlements.plist"
     },
     "windows": {
       "nsis": {

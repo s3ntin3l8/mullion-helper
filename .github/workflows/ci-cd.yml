@@ -7,8 +7,21 @@ on:
     branches: ["main"]
 
 jobs:
+  # Matrixed onto macos-14 in addition to ubuntu-latest so this job actually
+  # EXECUTES the macOS worker SEA, not just the Linux one. Before this, no CI
+  # job anywhere ever ran the macOS sidecar -- ci-tauri.yml (below) is
+  # compile-verification only (cargo build, never the sidecar) -- so a real
+  # v0.1.6 production regression (the sidecar crashing at V8 startup because
+  # its ad-hoc re-sign dropped the com.apple.security.cs.allow-jit
+  # entitlement Hardened Runtime requires for MAP_JIT) shipped undetected.
+  # The "Assert macOS worker carries the JIT entitlement" step below is the
+  # regression guard for that specific failure mode.
   frontend-and-worker:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
     permissions:
       contents: read
     steps:
@@ -25,6 +38,15 @@ jobs:
         run: |
           build/worker-sea/mullion-bridge-worker version --json
           build/worker-sea/mullion-bridge-worker inspect --json
+      # `version --json` above already boots V8, so it's the real regression
+      # test for the JIT crash -- this assertion additionally guards against
+      # a future change that quietly drops the entitlement while some other
+      # code path happens to still work.
+      - name: Assert macOS worker carries the JIT entitlement
+        if: runner.os == 'macOS'
+        run: |
+          codesign -d --entitlements - build/worker-sea/mullion-bridge-worker 2>&1 | tee /tmp/entitlements.txt
+          grep -q allow-jit /tmp/entitlements.txt
 
   ci-tauri:
     permissions:

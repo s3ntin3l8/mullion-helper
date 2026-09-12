@@ -53,6 +53,10 @@ const seaConfigPath = path.join(buildDir, "sea-config.json");
 const blobPath = path.join(buildDir, "helper.blob");
 const exeName = process.platform === "win32" ? "mullion-bridge-worker.exe" : "mullion-bridge-worker";
 const exePath = path.join(buildDir, exeName);
+// Same file Tauri applies to the bundled sidecar (bundle.macOS.entitlements in
+// src-tauri/tauri.conf.json) -- kept as one source of truth so the staged SEA
+// and the DMG-bundled copy never diverge again. See signDarwinBinary() below.
+const entitlementsPath = path.join(repoRoot, "src-tauri", "entitlements.plist");
 
 // The Node SEA "sentinel fuse" — a fixed, documented constant (not a secret,
 // not versioned per-Node-release), identical for every SEA anyone builds;
@@ -157,16 +161,46 @@ function removeDarwinSignature() {
 // Single Executable Applications docs' macOS walkthrough ends with exactly
 // this call, in this position (after injection, not before) —
 // https://nodejs.org/api/single-executable-applications.html.
+//
+// UNLIKE the plain docs example, this re-sign passes --entitlements. The
+// official Node.org macOS build carries com.apple.security.cs.allow-jit
+// (nodejs/node tools/osx-entitlements.plist); a bare `codesign --sign -`
+// drops that, and V8's Isolate::Init then fails to mmap(MAP_JIT) its code
+// range under Hardened Runtime, crashing at startup with "Fatal process
+// out of memory: Failed to reserve virtual memory for CodeRange" -- despite
+// the wording, that's a JIT-memory denial, not a heap-size problem. This
+// bit the shipped 0.1.6 macOS build in production; nothing here caught it
+// because CI only ever executed the Linux SEA (see ci-cd.yml).
+//
+// --options runtime is not itself load-bearing for the JIT fix (allow-jit
+// works with or without hardened runtime on arm64) -- it's included so this
+// staged binary's signing flags match what tauri-bundler applies when it
+// re-signs the sidecar as part of the .app bundle (src-tauri/tauri.conf.json
+// bundle.macOS.hardenedRuntime defaults to true), keeping `make dev`/`make
+// test` and the built DMG from silently diverging in signature shape again.
 function signDarwinBinary() {
   if (process.platform !== "darwin") return;
-  log("re-signing (ad-hoc) after SEA blob injection");
+  log("re-signing (ad-hoc, with entitlements) after SEA blob injection");
   // Issue #1058: `--force` is required when a stale signature is still
   // attached to the binary (e.g. removeDarwinSignature above silently
   // failed because codesign exists but the existing signature is
   // corrupted). Without it, codesign refuses to overwrite the prior
   // signature and the build fails with a confusing "already signed" error
   // rather than the actual root cause.
-  execFileSync("codesign", ["--sign", "-", "--force", exePath], { stdio: "inherit" });
+  execFileSync(
+    "codesign",
+    [
+      "--sign",
+      "-",
+      "--force",
+      "--entitlements",
+      entitlementsPath,
+      "--options",
+      "runtime",
+      exePath,
+    ],
+    { stdio: "inherit" },
+  );
 }
 
 // Issue #1058: pre-flight check for node_modules/.bin/postject. The
@@ -209,8 +243,8 @@ function injectBlob() {
   // exercised anywhere — no macOS CI job existed, and it can only run on
   // real macOS hardware (postject operates on the actual binary format of
   // whatever `copyNodeBinary()` just copied; there's no cross-build path).
-  // `.github/workflows/ci-cd.yml`'s `test-macos` job is the first real
-  // exercise of this branch.
+  // `.github/workflows/ci-cd.yml`'s `frontend-and-worker` job's macos-14
+  // matrix entry is the first real exercise of this branch.
   if (process.platform === "darwin") {
     args.push("--macho-segment-name", "NODE_SEA");
   }
