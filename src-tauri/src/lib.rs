@@ -11,7 +11,7 @@ use tauri::{
     Manager, RunEvent, WindowEvent,
 };
 use tauri_plugin_autostart::MacosLauncher;
-use tauri_plugin_log::{Target, TargetKind};
+use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_updater::UpdaterExt;
 
@@ -142,6 +142,19 @@ pub fn run() {
                     #[cfg(debug_assertions)]
                     Target::new(TargetKind::Stdout),
                 ])
+                // The plugin's own defaults (40KB, KeepOne) are tuned for a
+                // server-style app with steady, moderate log volume. This
+                // app's dominant failure mode is the opposite: a bridge
+                // worker stuck in a reconnect/crash loop can write dozens of
+                // multi-line stack traces in quick succession (see
+                // Supervisor::handle_stderr), which at the default cap can
+                // rotate away the very first crash — the one a user actually
+                // wants to attach to a report — within a couple of loop
+                // iterations. 1MB x 6 files is a trivial disk budget for a
+                // desktop app's data dir and gives a crash loop room to
+                // breathe before anything gets evicted. Tracked: issue #36.
+                .max_file_size(1_000_000)
+                .rotation_strategy(RotationStrategy::KeepSome(5))
                 .build(),
         )
         .plugin(tauri_plugin_opener::init())
