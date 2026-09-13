@@ -589,9 +589,7 @@ fn pick_auto_detected_socket(
     if let Some(path) = first_existing_1password {
         return Some(path.to_owned());
     }
-    env_sock_exists
-        .then(|| env_sock.map(str::to_owned))
-        .flatten()
+    env_sock.filter(|_| env_sock_exists).map(str::to_owned)
 }
 
 fn resolve_agent_socket(settings: &Settings) -> Option<String> {
