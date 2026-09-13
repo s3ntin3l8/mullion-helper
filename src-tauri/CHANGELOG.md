@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.8](https://github.com/s3ntin3l8/mullion-helper/compare/v0.1.7...v0.1.8) (2026-09-13)
+
+
+### Bug Fixes
+
+* hide macOS dock icon for tray-only app ([#41](https://github.com/s3ntin3l8/mullion-helper/issues/41)) ([e7cf7d1](https://github.com/s3ntin3l8/mullion-helper/commit/e7cf7d1f23330ed958ccf8b4e9258d02ca469b45))
+
 ## [0.1.7](https://github.com/s3ntin3l8/mullion-helper/compare/v0.1.6...v0.1.7) (2026-09-12)
 
 
