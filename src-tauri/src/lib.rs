@@ -184,17 +184,6 @@ pub fn run() {
             }
         })
         .setup(|app| {
-            #[cfg(target_os = "macos")]
-            {
-                use objc2_app_kit::NSApplication;
-                use objc2::ClassType;
-                unsafe {
-                    NSApplication::sharedApplication().setActivationPolicy_(
-                        objc2_app_kit::NSApplicationActivationPolicy::NSApplicationActivationPolicyAccessory,
-                    );
-                }
-            }
-
             let data_dir = app.path().app_data_dir()?;
             let pending_migration = migration::import_legacy_credential(&data_dir);
             let supervisor =
