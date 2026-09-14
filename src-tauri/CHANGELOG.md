@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.10](https://github.com/s3ntin3l8/mullion-helper/compare/v0.1.9...v0.1.10) (2026-09-14)
+
+
+### Features
+
+* allow re-pairing and unpairing after setup ([#47](https://github.com/s3ntin3l8/mullion-helper/issues/47)) ([10a30c4](https://github.com/s3ntin3l8/mullion-helper/commit/10a30c426a8f7512c9c5acdc8b9a47c16b560752))
+
+
+### Bug Fixes
+
+* **macos:** explicitly toggle activation policy around window visibility ([#49](https://github.com/s3ntin3l8/mullion-helper/issues/49)) ([17f3b11](https://github.com/s3ntin3l8/mullion-helper/commit/17f3b114bc1b3bb2b399a799e7afe84e4e9fdb1c))
+
 ## [0.1.9](https://github.com/s3ntin3l8/mullion-helper/compare/v0.1.8...v0.1.9) (2026-09-14)
 
 
