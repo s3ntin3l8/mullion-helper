@@ -569,7 +569,15 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), String>
 /// unconditionally rather than gated on `cfg!(target_os = "macos")` —
 /// which also means the regression tests below exercise the real code path
 /// on Linux CI instead of silently no-op'ing.
+///
+/// A trailing slash is trimmed before matching. launchd doesn't hand out
+/// `SSH_AUTH_SOCK` with one, so this isn't reachable today, but the
+/// direction this function fails open in matters: a false negative here
+/// means trusting the empty launchd agent over 1Password again — the exact
+/// bug class this function exists to prevent — so it's worth the one line
+/// even for an input shape nothing currently produces.
 fn is_macos_launchd_socket(path: &str) -> bool {
+    let path = path.trim_end_matches('/');
     path.ends_with("/Listeners")
         && path
             .rsplit('/')
@@ -813,6 +821,11 @@ mod tests {
         ));
         assert!(!is_macos_launchd_socket(
             "/var/run/com.apple.launchd.oLcNuPYLZu/NotListeners"
+        ));
+        // A trailing slash must not defeat the match — a false negative
+        // here means trusting an empty agent over 1Password again.
+        assert!(is_macos_launchd_socket(
+            "/var/run/com.apple.launchd.oLcNuPYLZu/Listeners/"
         ));
     }
 
