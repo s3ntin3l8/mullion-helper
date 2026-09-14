@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.9](https://github.com/s3ntin3l8/mullion-helper/compare/v0.1.8...v0.1.9) (2026-09-14)
+
+
+### Bug Fixes
+
+* **macos:** match the launchd socket by path shape, not a hardcoded prefix ([#46](https://github.com/s3ntin3l8/mullion-helper/issues/46)) ([88ffc65](https://github.com/s3ntin3l8/mullion-helper/commit/88ffc6578ae1a2bb941f91f84a45c5bd9db204a2))
+* **macos:** rank the launchd SSH agent below 1Password in auto-detect ([#43](https://github.com/s3ntin3l8/mullion-helper/issues/43)) ([8f1bfd3](https://github.com/s3ntin3l8/mullion-helper/commit/8f1bfd3951e37619b6287e7284c501a46b216ce9))
+* **macos:** set accessory activation policy at runtime ([#45](https://github.com/s3ntin3l8/mullion-helper/issues/45)) ([bb0d750](https://github.com/s3ntin3l8/mullion-helper/commit/bb0d7502adbac92749f2f5600a9e9bac93e5ac48))
+
 ## [0.1.8](https://github.com/s3ntin3l8/mullion-helper/compare/v0.1.7...v0.1.8) (2026-09-13)
 
 
