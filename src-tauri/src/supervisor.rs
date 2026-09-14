@@ -232,6 +232,31 @@ impl<R: Runtime> Supervisor<R> {
         Ok(self.status())
     }
 
+    /// Forgets this computer's pairing so it can be re-paired against a
+    /// different (or the same) primary. Stops the child and waits for it to
+    /// exit *before* deleting the credential file — the live worker rotates
+    /// the session on its own schedule and would otherwise be able to
+    /// rewrite the file out from under this deletion, same ordering
+    /// `pair()` above already relies on via `stop_child()`. Deleting the
+    /// file is sufficient on its own: `run_loop`'s `inspect` check picks up
+    /// `paired: false` on its next iteration and moves to `Unpaired`, but
+    /// setting the status here too means the UI updates immediately rather
+    /// than waiting for that poll.
+    pub fn unpair(&self) -> Result<BridgeStatus, String> {
+        self.0.desired.store(false, Ordering::SeqCst);
+        self.stop_child();
+        let credential_path = self.0.data_dir.join("worker/ssh-agent-bridge.json");
+        match fs::remove_file(&credential_path) {
+            Ok(()) => {}
+            // Already unpaired (or never paired): treat as success rather
+            // than surfacing an error for a state the caller already wants.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
+        }
+        self.set_status(BridgeStatus::new(BridgeState::Unpaired, None));
+        Ok(self.status())
+    }
+
     fn run_loop(&self) {
         let mut attempt = 0usize;
         while !self.0.shutdown.load(Ordering::SeqCst) {
@@ -740,6 +765,37 @@ mod tests {
 
         assert!(!status.success());
         assert!(child.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn unpair_deletes_the_credential_and_reports_unpaired() {
+        let app = tauri::test::mock_app();
+        let data_dir = test_data_dir("unpair");
+        let supervisor = Supervisor::new(app.handle().clone(), data_dir.clone()).unwrap();
+        let credential_path = data_dir.join("worker/ssh-agent-bridge.json");
+        fs::write(&credential_path, b"{}").unwrap();
+
+        let status = supervisor.unpair().expect("unpair should succeed");
+
+        assert_eq!(status.state, BridgeState::Unpaired);
+        assert!(!credential_path.exists());
+        assert!(!supervisor.0.desired.load(Ordering::SeqCst));
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn unpair_is_idempotent_when_already_unpaired() {
+        let app = tauri::test::mock_app();
+        let data_dir = test_data_dir("unpair-idempotent");
+        let supervisor = Supervisor::new(app.handle().clone(), data_dir.clone()).unwrap();
+        // No credential file was ever written for this data dir.
+
+        let status = supervisor
+            .unpair()
+            .expect("unpairing an already-unpaired bridge should succeed, not error");
+
+        assert_eq!(status.state, BridgeState::Unpaired);
+        let _ = fs::remove_dir_all(data_dir);
     }
 
     #[test]

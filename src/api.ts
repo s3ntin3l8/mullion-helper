@@ -9,6 +9,7 @@ export const api = {
   status: () => inTauri ? invoke<BridgeStatus>("bridge_status") : Promise.resolve(demoStatus),
   settings: () => inTauri ? invoke<Settings>("get_settings") : Promise.resolve({ ssh_auth_sock: "", insecure: false, launch_at_login: false }),
   pair: (payload: string) => invoke<BridgeStatus>("pair_bridge", { payload }),
+  unpair: () => invoke<BridgeStatus>("unpair_bridge"),
   start: () => invoke<BridgeStatus>("start_bridge"),
   pause: () => invoke<BridgeStatus>("pause_bridge"),
   saveSettings: (settings: Settings) => invoke<Settings>("save_settings", { settings }),
