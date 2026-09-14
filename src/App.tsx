@@ -36,6 +36,7 @@ export function App() {
   const [payload, setPayload] = useState("");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
+  const [confirmingUnpair, setConfirmingUnpair] = useState(false);
   const [updateVersion, setUpdateVersion] = useState<string | null>(null);
   const [diagnosticsPath, setDiagnosticsPath] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -87,6 +88,31 @@ export function App() {
       setPayload(""); return paired;
     });
   }
+  async function unpair() {
+    await act(async () => {
+      try {
+        const result = await api.unpair();
+        await refresh();
+        return result;
+      } catch (error) {
+        // The backend has already set desired=false and stopped the child
+        // by the time unpair() can throw, no matter which step inside it
+        // failed -- so the card showing the pre-unpair status (e.g. still
+        // "Bridge connected") is stale, not just pending. Refresh so it
+        // reflects what the backend now reports (likely Error, with the
+        // failure in detail) instead of a status that's already wrong.
+        // Swallow refresh's own failure so it can't replace the error
+        // act() is about to show as the notice.
+        await refresh().catch(() => {});
+        throw error;
+      } finally {
+        // Reset the confirm row on rejection too -- otherwise it stays
+        // expanded over a machine that may already be unpaired (act()'s
+        // catch only sets an error notice, it doesn't touch this state).
+        setConfirmingUnpair(false);
+      }
+    });
+  }
   async function save() {
     if (!settings) return;
     setBusy(true); setNotice(null);
@@ -95,7 +121,9 @@ export function App() {
         if (settings.launch_at_login) await enable(); else await disable();
       }
       setSettings(await api.saveSettings(settings));
-      setNotice(infoNotice("Settings saved. The bridge was restarted with the new configuration."));
+      // While unpaired there's no running worker for save_settings to
+      // restart -- saying so anyway would be actively wrong, not just vague.
+      setNotice(infoNotice(needsPairing ? "Settings saved." : "Settings saved. The bridge was restarted with the new configuration."));
     } catch (error) { setNotice(errorNotice(String(error))); } finally { setBusy(false); }
   }
   async function checkUpdates() {
@@ -110,6 +138,13 @@ export function App() {
   const connected = status?.state === "connected";
   const running = status && !["paused", "unpaired", "needs_pairing", "error"].includes(status.state);
   const needsPairing = status && ["unpaired", "needs_pairing"].includes(status.state);
+  // Reused for both first-time setup (shown expanded, below) and re-pairing
+  // an already-paired computer (shown collapsed inside Settings) — same
+  // payload state and the same pair() handler either way.
+  const pairingForm = <>
+    <label>Pairing payload<textarea value={payload} onChange={(event) => setPayload(event.target.value)} placeholder="Paste pairing payload" rows={3} /></label>
+    <button disabled={busy || !payload.trim()} onClick={() => void pair()}>{busy ? "Pairing…" : "Pair and start"}</button>
+  </>;
   return <main className="shell">
     <header><BrandMark /><div><h1>Mullion Helper</h1><p>Your local SSH-agent bridge</p></div></header>
     <section className="status-card" aria-live="polite">
@@ -117,8 +152,15 @@ export function App() {
       <div className="status-copy"><strong>{status ? labels[status.state] : "Loading…"}</strong><span>{status?.detail ?? (connected ? "Your SSH agent is available to Mullion sessions." : "The tray icon keeps the bridge available in the background.")}</span>{status?.base_url && <small>{status.base_url}</small>}</div>
       {!needsPairing && (running ? <button className="secondary" disabled={busy} onClick={() => void act(api.pause)}>Pause</button> : <button disabled={busy} onClick={() => void act(api.start)}>Start</button>)}
     </section>
-    {needsPairing && <section className="panel onboarding"><span className="eyebrow">First-time setup</span><h2>Connect this computer</h2><p>In Mullion, open Settings → Hosts → SSH agent bridges, create a pairing code, then paste the payload below.</p><label>Pairing payload<textarea value={payload} onChange={(event) => setPayload(event.target.value)} placeholder="Paste pairing payload" rows={3} /></label><button disabled={busy || !payload.trim()} onClick={() => void pair()}>{busy ? "Pairing…" : "Pair and start"}</button></section>}
-    {!needsPairing && settings && <section className="panel"><span className="eyebrow">Configuration</span><h2>Settings</h2><label>SSH agent socket<input value={settings.ssh_auth_sock} onChange={(event) => setSettings({ ...settings, ssh_auth_sock: event.target.value })} placeholder="Auto-detect" /></label><p className="hint">Leave blank to detect SSH_AUTH_SOCK, 1Password, or the Windows OpenSSH-compatible pipe.</p><label className="toggle"><input type="checkbox" checked={settings.launch_at_login} onChange={(event) => setSettings({ ...settings, launch_at_login: event.target.checked })} /><span>Launch at login</span></label><label className="toggle"><input type="checkbox" checked={settings.insecure} onChange={(event) => setSettings({ ...settings, insecure: event.target.checked })} /><span>Allow self-signed TLS certificates</span></label><button disabled={busy} onClick={() => void save()}>Save settings</button></section>}
+    {needsPairing && <section className="panel onboarding"><span className="eyebrow">First-time setup</span><h2>Connect this computer</h2><p>In Mullion, open Settings → Hosts → SSH agent bridges, create a pairing code, then paste the payload below.</p>{pairingForm}</section>}
+    {settings && <section className="panel"><span className="eyebrow">Configuration</span><h2>Settings</h2><label>SSH agent socket<input value={settings.ssh_auth_sock} onChange={(event) => setSettings({ ...settings, ssh_auth_sock: event.target.value })} placeholder="Auto-detect" /></label><p className="hint">Leave blank to detect SSH_AUTH_SOCK, 1Password, or the Windows OpenSSH-compatible pipe.</p><label className="toggle"><input type="checkbox" checked={settings.launch_at_login} onChange={(event) => setSettings({ ...settings, launch_at_login: event.target.checked })} /><span>Launch at login</span></label><label className="toggle"><input type="checkbox" checked={settings.insecure} onChange={(event) => setSettings({ ...settings, insecure: event.target.checked })} /><span>Allow self-signed TLS certificates</span></label><button disabled={busy} onClick={() => void save()}>Save settings</button>
+      {!needsPairing && <div className="repair">
+        <details><summary>Re-pair this computer</summary><div className="payload-form">{pairingForm}</div></details>
+        <div className="unpair-row">{confirmingUnpair
+          ? <span className="confirm">Remove this computer's pairing?<button type="button" className="danger" disabled={busy} onClick={() => void unpair()}>Unpair</button><button type="button" className="link" disabled={busy} onClick={() => setConfirmingUnpair(false)}>Cancel</button></span>
+          : <button type="button" className="link danger" onClick={() => setConfirmingUnpair(true)}>Unpair this computer</button>}</div>
+      </div>}
+    </section>}
     {updateVersion && <section className="update"><div><strong>Mullion Helper {updateVersion} is available</strong><span>The app will restart after installing.</span></div><button disabled={busy} onClick={() => { setBusy(true); void api.installUpdate().catch((error) => { setNotice(errorNotice(String(error))); setBusy(false); }); }}>Install update</button></section>}
     {notice && (notice.kind === "error"
       ? <section className="notice notice-error" role="alert">

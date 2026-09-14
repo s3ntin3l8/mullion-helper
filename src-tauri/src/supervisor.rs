@@ -232,6 +232,84 @@ impl<R: Runtime> Supervisor<R> {
         Ok(self.status())
     }
 
+    /// Forgets this computer's pairing so it can be re-paired against a
+    /// different (or the same) primary. Stops the child and waits for it to
+    /// exit *before* deleting the credential file — the live worker rotates
+    /// the session on its own schedule and would otherwise be able to
+    /// rewrite the file out from under this deletion, same ordering
+    /// `pair()` above already relies on via `stop_child()`. Deleting the
+    /// file is sufficient on its own: `run_loop`'s `inspect` check picks up
+    /// `paired: false` on its next iteration and moves to `Unpaired`, but
+    /// setting the status here too means the UI updates immediately rather
+    /// than waiting for that poll. `ssh-agent-bridge.json` is the worker's
+    /// *only* persisted state — `saveCredential` in helper.mjs is the sole
+    /// write site, shared by `pair` and session renewal — so deleting it is
+    /// a complete, not partial, unpair.
+    pub fn unpair(&self) -> Result<BridgeStatus, String> {
+        self.0.desired.store(false, Ordering::SeqCst);
+        self.stop_child();
+        let credential_path = self.0.data_dir.join("worker/ssh-agent-bridge.json");
+        if let Err(error) = fs::remove_file(&credential_path) {
+            // Already unpaired (or never paired): treat as success rather
+            // than surfacing an error for a state the caller already wants.
+            if error.kind() != std::io::ErrorKind::NotFound {
+                // Leaving the previous status (e.g. Connected/Reconnecting)
+                // in place here would be actively wrong: desired is already
+                // false and the child is already stopped, so nothing is
+                // running regardless of whether the delete succeeded. An
+                // error here means the credential might still be on disk,
+                // so report Error rather than claiming Unpaired.
+                let message = error.to_string();
+                self.set_status(BridgeStatus::new(BridgeState::Error, Some(message.clone())));
+                return Err(message);
+            }
+        }
+        // A never-completed legacy-tool migration (imported at startup but
+        // never reached a successful `connected` event -- e.g. a
+        // paired-but-unreachable install, the exact shape of the outage
+        // this command exists to recover from) leaves the marker file
+        // unwritten and the original legacy credential untouched on disk.
+        // Without finishing it here, the next launch's
+        // `import_legacy_credential` would silently re-copy that same
+        // credential right back into the file just deleted above --
+        // undoing this unpair on restart. Treat "the user unpaired" as
+        // equivalent to "migration complete": finish it now, the same way
+        // a successful connect already does in `handle_event`.
+        if let Some(state) = self.0.app.try_state::<MigrationState>() {
+            if let Some(migration) = state.0.lock().expect("migration mutex poisoned").take() {
+                if let Err(error) = migration.commit() {
+                    // commit() collapses two different failure modes into
+                    // one Result: disabling the legacy service (which runs
+                    // FIRST and short-circuits the rest via `?`) failing,
+                    // and the marker write itself failing. Don't assume
+                    // which one happened — check. If the marker genuinely
+                    // wasn't written, the exact resurrection risk this
+                    // whole block exists to close is still open on the
+                    // next launch, which is worth surfacing loudly (Error)
+                    // rather than as an easy-to-miss detail string. Only
+                    // treat it as a benign cleanup hiccup if the marker
+                    // exists despite the reported error.
+                    let marker_written = self.0.data_dir.join("legacy-migration.json").exists();
+                    self.set_status(BridgeStatus::new(
+                        if marker_written {
+                            BridgeState::Unpaired
+                        } else {
+                            BridgeState::Error
+                        },
+                        Some(error.clone()),
+                    ));
+                    return if marker_written {
+                        Ok(self.status())
+                    } else {
+                        Err(error)
+                    };
+                }
+            }
+        }
+        self.set_status(BridgeStatus::new(BridgeState::Unpaired, None));
+        Ok(self.status())
+    }
+
     fn run_loop(&self) {
         let mut attempt = 0usize;
         while !self.0.shutdown.load(Ordering::SeqCst) {
@@ -357,6 +435,25 @@ impl<R: Runtime> Supervisor<R> {
     }
 
     fn handle_event(&self, line: &str) {
+        // A supervisor-initiated stop (pause/unpair/re-pair) sets `desired =
+        // false` *before* killing the child, but the child's stdout reader
+        // thread (spawned in run_loop, never joined by stop_child()) can
+        // still be draining lines the worker wrote just before it was
+        // killed. Without this gate, a stray late "connected" /
+        // "connect_failed" / "dead_credential" line can overwrite the
+        // terminal status (Paused/Unpaired) the caller just set — e.g. the
+        // user clicks "Unpair" and the UI flips back to "Reconnecting" a
+        // moment later even though the credential is already gone and
+        // nothing is running. Once `desired` is false the supervisor has
+        // already decided the bridge shouldn't be running; nothing the
+        // worker says from here counts. (This narrows the race to the
+        // interval between this check and the caller's own set_status
+        // call, rather than eliminating it outright — stop_child() kills
+        // the process itself, so no *new* events can be produced after
+        // that point, only already-buffered ones drained late.)
+        if !self.0.desired.load(Ordering::SeqCst) {
+            return;
+        }
         let Ok(event) = serde_json::from_str::<Value>(line) else {
             return;
         };
@@ -382,6 +479,18 @@ impl<R: Runtime> Supervisor<R> {
                         state.0.lock().expect("migration mutex poisoned").take()
                     {
                         if let Err(error) = migration.commit() {
+                            // Unlike unpair()'s commit()-failure handling
+                            // below, this is always Error, unconditionally
+                            // — deliberately not mirroring unpair()'s
+                            // "check whether the marker actually landed"
+                            // nuance. Here the user's intent (be connected,
+                            // with a clean, committed migration) failed
+                            // outright: the bridge is stopped in response.
+                            // In unpair()'s case the user's intent
+                            // (be unpaired) already succeeded regardless of
+                            // this failure — the only question is whether a
+                            // *future* restart is still safe, which is what
+                            // that check answers.
                             self.0.desired.store(false, Ordering::SeqCst);
                             self.stop_child();
                             self.set_status(BridgeStatus::new(BridgeState::Error, Some(error)));
@@ -740,6 +849,194 @@ mod tests {
 
         assert!(!status.success());
         assert!(child.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn unpair_stops_a_running_child_before_deleting_the_credential() {
+        let app = tauri::test::mock_app();
+        let data_dir = test_data_dir("unpair-stops-child");
+        let supervisor = Supervisor::new(app.handle().clone(), data_dir.clone()).unwrap();
+        *supervisor.0.child.lock().unwrap() = Some(sleeping_child());
+
+        supervisor.unpair().expect("unpair should succeed");
+
+        assert!(supervisor.0.child.lock().unwrap().is_none());
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn unpair_deletes_the_credential_and_reports_unpaired() {
+        let app = tauri::test::mock_app();
+        let data_dir = test_data_dir("unpair");
+        let supervisor = Supervisor::new(app.handle().clone(), data_dir.clone()).unwrap();
+        let credential_path = data_dir.join("worker/ssh-agent-bridge.json");
+        fs::write(&credential_path, b"{}").unwrap();
+
+        let status = supervisor.unpair().expect("unpair should succeed");
+
+        assert_eq!(status.state, BridgeState::Unpaired);
+        assert!(!credential_path.exists());
+        assert!(!supervisor.0.desired.load(Ordering::SeqCst));
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn unpair_is_idempotent_when_already_unpaired() {
+        let app = tauri::test::mock_app();
+        let data_dir = test_data_dir("unpair-idempotent");
+        let supervisor = Supervisor::new(app.handle().clone(), data_dir.clone()).unwrap();
+        // No credential file was ever written for this data dir.
+
+        let status = supervisor
+            .unpair()
+            .expect("unpairing an already-unpaired bridge should succeed, not error");
+
+        assert_eq!(status.state, BridgeState::Unpaired);
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
+    // Regression for the migration-durability warning Hermes review round 2
+    // flagged on PR #47: a legacy-tool credential imported at startup but
+    // never committed (because the bridge never reached a successful
+    // "connected" event -- the exact shape of a paired-but-unreachable
+    // install) left no marker file. Without unpair() finishing that pending
+    // migration, the next launch's import_legacy_credential would silently
+    // re-copy the same credential the user just unpaired right back into
+    // the file unpair() just deleted, undoing the unpair on restart.
+    #[test]
+    #[cfg(not(windows))]
+    fn unpair_completes_a_pending_legacy_migration_so_a_relaunch_cannot_resurrect_it() {
+        let _lock = AGENT_ENV_LOCK.lock().unwrap();
+        let app = tauri::test::mock_app();
+        let data_dir = test_data_dir("unpair-migration");
+        fs::create_dir_all(&data_dir).unwrap();
+        let legacy_home = test_data_dir("unpair-migration-legacy-home");
+        let legacy_dir = legacy_home.join(".local/state/mullion");
+        fs::create_dir_all(&legacy_dir).unwrap();
+        fs::write(
+            legacy_dir.join("ssh-agent-bridge.json"),
+            br#"{"baseUrl":"https://example.com","bridgeId":"123e4567-e89b-12d3-a456-426614174000","sessionId":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}"#,
+        )
+        .unwrap();
+        let _home_guard = EnvVarGuard::set("HOME", legacy_home.to_str().unwrap());
+        let _xdg_guard = EnvVarGuard::unset("XDG_STATE_HOME");
+
+        let pending = crate::migration::import_legacy_credential(&data_dir)
+            .expect("a valid legacy credential should produce a pending migration");
+        // Simulates what lib.rs's setup() does: the pending migration sits
+        // in managed state, uncommitted, because should_start was false
+        // (or the app was closed) before a "connected" event ever fired.
+        app.manage(crate::migration::MigrationState(Mutex::new(Some(pending))));
+        let supervisor = Supervisor::new(app.handle().clone(), data_dir.clone()).unwrap();
+
+        supervisor.unpair().expect("unpair should succeed");
+
+        assert!(
+            data_dir.join("legacy-migration.json").exists(),
+            "unpair must finish the pending migration so a relaunch can't re-import it"
+        );
+        assert!(
+            crate::migration::import_legacy_credential(&data_dir).is_none(),
+            "a relaunch must not resurrect the credential the user just unpaired"
+        );
+
+        let _ = fs::remove_dir_all(&data_dir);
+        let _ = fs::remove_dir_all(&legacy_home);
+    }
+
+    // Regression for the round-4 note on PR #47: commit() collapses two
+    // different failure modes into one Result, and disable_legacy_service()
+    // running first (short-circuiting the marker write via `?`) means BOTH
+    // failure modes leave the marker unwritten today. unpair() must not
+    // assume a commit() failure is benign just because the credential was
+    // already deleted -- it has to check whether the marker actually landed.
+    #[test]
+    #[cfg(not(windows))]
+    fn unpair_reports_error_if_the_migration_marker_was_not_actually_written() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _lock = AGENT_ENV_LOCK.lock().unwrap();
+        let app = tauri::test::mock_app();
+        let data_dir = test_data_dir("unpair-migration-marker-fails");
+        fs::create_dir_all(&data_dir).unwrap();
+        let legacy_home = test_data_dir("unpair-migration-marker-fails-legacy-home");
+        let legacy_dir = legacy_home.join(".local/state/mullion");
+        fs::create_dir_all(&legacy_dir).unwrap();
+        fs::write(
+            legacy_dir.join("ssh-agent-bridge.json"),
+            br#"{"baseUrl":"https://example.com","bridgeId":"123e4567-e89b-12d3-a456-426614174000","sessionId":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}"#,
+        )
+        .unwrap();
+        let _home_guard = EnvVarGuard::set("HOME", legacy_home.to_str().unwrap());
+        let _xdg_guard = EnvVarGuard::unset("XDG_STATE_HOME");
+
+        let pending = crate::migration::import_legacy_credential(&data_dir)
+            .expect("a valid legacy credential should produce a pending migration");
+        app.manage(crate::migration::MigrationState(Mutex::new(Some(pending))));
+        let supervisor = Supervisor::new(app.handle().clone(), data_dir.clone()).unwrap();
+
+        // Make the marker write fail: on Linux, disable_legacy_service() is
+        // a no-op Ok(()), so this is the only way commit() can fail here.
+        let mut permissions = fs::metadata(&data_dir).unwrap().permissions();
+        permissions.set_mode(0o500);
+        fs::set_permissions(&data_dir, permissions).unwrap();
+
+        let result = supervisor.unpair();
+
+        // Restore write access before any cleanup that needs it.
+        let mut permissions = fs::metadata(&data_dir).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&data_dir, permissions).unwrap();
+
+        assert!(
+            result.is_err(),
+            "a commit() failure that left the marker unwritten must surface as an error, not a silent success"
+        );
+        assert_eq!(supervisor.status().state, BridgeState::Error);
+        assert!(!data_dir.join("legacy-migration.json").exists());
+
+        let _ = fs::remove_dir_all(&data_dir);
+        let _ = fs::remove_dir_all(&legacy_home);
+    }
+
+    #[test]
+    fn late_worker_events_are_ignored_once_desired_is_false() {
+        // Regression for the race Hermes review flagged on PR #47: a stray
+        // event from the just-killed worker's detached stdout reader
+        // thread, dispatched after unpair()/pause() already set a terminal
+        // status, must not overwrite it.
+        let app = tauri::test::mock_app();
+        let data_dir = test_data_dir("late-event-ignored");
+        let supervisor = Supervisor::new(app.handle().clone(), data_dir.clone()).unwrap();
+        supervisor.set_status(BridgeStatus::new(BridgeState::Unpaired, None));
+        assert!(!supervisor.0.desired.load(Ordering::SeqCst));
+
+        supervisor.handle_event(r#"{"type":"connected","base_url":"https://example.com"}"#);
+        assert_eq!(supervisor.status().state, BridgeState::Unpaired);
+
+        supervisor.handle_event(r#"{"type":"connect_failed","message":"connection error"}"#);
+        assert_eq!(supervisor.status().state, BridgeState::Unpaired);
+
+        supervisor.handle_event(r#"{"type":"dead_credential","message":"revoked"}"#);
+        assert_eq!(supervisor.status().state, BridgeState::Unpaired);
+
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn worker_events_still_apply_normally_while_desired() {
+        // The gate above must not silently break the ordinary, non-race
+        // path: while the supervisor still wants the bridge running, a
+        // "connected" event must still land.
+        let app = tauri::test::mock_app();
+        let data_dir = test_data_dir("normal-event-applies");
+        let supervisor = Supervisor::new(app.handle().clone(), data_dir.clone()).unwrap();
+        supervisor.0.desired.store(true, Ordering::SeqCst);
+
+        supervisor.handle_event(r#"{"type":"connected","base_url":"https://example.com"}"#);
+
+        assert_eq!(supervisor.status().state, BridgeState::Connected);
+        let _ = fs::remove_dir_all(data_dir);
     }
 
     #[test]

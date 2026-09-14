@@ -52,6 +52,11 @@ fn pair_bridge(
 }
 
 #[tauri::command]
+fn unpair_bridge(supervisor: tauri::State<'_, Supervisor>) -> Result<BridgeStatus, String> {
+    supervisor.unpair()
+}
+
+#[tauri::command]
 fn diagnostics_path(app: tauri::AppHandle) -> Result<String, String> {
     app.path()
         .app_log_dir()
@@ -173,6 +178,7 @@ pub fn run() {
             start_bridge,
             pause_bridge,
             pair_bridge,
+            unpair_bridge,
             diagnostics_path,
             check_for_updates,
             install_update
@@ -264,10 +270,25 @@ pub fn run() {
                     "open" => show_main(app),
                     "toggle" => {
                         let supervisor = app.state::<Supervisor>();
-                        if matches!(supervisor.status().state, supervisor::BridgeState::Paused) {
-                            supervisor.start();
-                        } else {
-                            supervisor.pause();
+                        match supervisor.status().state {
+                            supervisor::BridgeState::Paused => {
+                                supervisor.start();
+                            }
+                            // Nothing to pause/resume before pairing exists
+                            // — falling through to pause() here would flip
+                            // to Paused, which hides the onboarding panel
+                            // (needsPairing in App.tsx only covers Unpaired
+                            // and NeedsPairing) behind a Start button that
+                            // just leads straight back to Unpaired anyway.
+                            // Open the window so the user lands on the
+                            // pairing form instead of that detour.
+                            supervisor::BridgeState::Unpaired
+                            | supervisor::BridgeState::NeedsPairing => {
+                                show_main(app);
+                            }
+                            _ => {
+                                supervisor.pause();
+                            }
                         }
                     }
                     "open_logs" => {
