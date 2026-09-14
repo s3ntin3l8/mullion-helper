@@ -184,6 +184,20 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            // Belt-and-braces alongside `Info.plist`'s `LSUIElement` key:
+            // that key is advisory metadata LaunchServices applies from its
+            // own cached registration for the bundle, which is populated at
+            // install/launch and does not necessarily refresh across an
+            // in-place update (or if a stale registration for an older
+            // install — e.g. an unejected release DMG — shadows the real
+            // one). A runtime `NSApplication` activation-policy change has
+            // no such caching layer: it always takes effect for the
+            // process that's actually running. Keep both; don't delete
+            // either as "redundant" — they cover different failure modes of
+            // the same "no dock icon" requirement.
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
             let data_dir = app.path().app_data_dir()?;
             let pending_migration = migration::import_legacy_credential(&data_dir);
             let supervisor =
