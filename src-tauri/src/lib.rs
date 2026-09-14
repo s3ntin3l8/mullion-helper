@@ -230,8 +230,6 @@ pub fn run() {
             let separator = PredefinedMenuItem::separator(app)?;
             let open_item =
                 MenuItem::with_id(app, "open", "Open Mullion Helper", true, None::<&str>)?;
-            let settings_item =
-                MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
             let toggle_item =
                 MenuItem::with_id(app, "toggle", "Pause / Resume Bridge", true, None::<&str>)?;
             let open_logs_item =
@@ -243,7 +241,6 @@ pub fn run() {
                     &status_item,
                     &separator,
                     &open_item,
-                    &settings_item,
                     &toggle_item,
                     &open_logs_item,
                     &quit_item,
@@ -270,7 +267,7 @@ pub fn run() {
                     }
                 })
                 .on_menu_event(|app, event| match event.id.as_ref() {
-                    "open" | "settings" => show_main(app),
+                    "open" => show_main(app),
                     "toggle" => {
                         let supervisor = app.state::<Supervisor>();
                         if matches!(supervisor.status().state, supervisor::BridgeState::Paused) {

@@ -382,6 +382,25 @@ impl<R: Runtime> Supervisor<R> {
     }
 
     fn handle_event(&self, line: &str) {
+        // A supervisor-initiated stop (pause/unpair/re-pair) sets `desired =
+        // false` *before* killing the child, but the child's stdout reader
+        // thread (spawned in run_loop, never joined by stop_child()) can
+        // still be draining lines the worker wrote just before it was
+        // killed. Without this gate, a stray late "connected" /
+        // "connect_failed" / "dead_credential" line can overwrite the
+        // terminal status (Paused/Unpaired) the caller just set — e.g. the
+        // user clicks "Unpair" and the UI flips back to "Reconnecting" a
+        // moment later even though the credential is already gone and
+        // nothing is running. Once `desired` is false the supervisor has
+        // already decided the bridge shouldn't be running; nothing the
+        // worker says from here counts. (This narrows the race to the
+        // interval between this check and the caller's own set_status
+        // call, rather than eliminating it outright — stop_child() kills
+        // the process itself, so no *new* events can be produced after
+        // that point, only already-buffered ones drained late.)
+        if !self.0.desired.load(Ordering::SeqCst) {
+            return;
+        }
         let Ok(event) = serde_json::from_str::<Value>(line) else {
             return;
         };
@@ -795,6 +814,46 @@ mod tests {
             .expect("unpairing an already-unpaired bridge should succeed, not error");
 
         assert_eq!(status.state, BridgeState::Unpaired);
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn late_worker_events_are_ignored_once_desired_is_false() {
+        // Regression for the race Hermes review flagged on PR #47: a stray
+        // event from the just-killed worker's detached stdout reader
+        // thread, dispatched after unpair()/pause() already set a terminal
+        // status, must not overwrite it.
+        let app = tauri::test::mock_app();
+        let data_dir = test_data_dir("late-event-ignored");
+        let supervisor = Supervisor::new(app.handle().clone(), data_dir.clone()).unwrap();
+        supervisor.set_status(BridgeStatus::new(BridgeState::Unpaired, None));
+        assert!(!supervisor.0.desired.load(Ordering::SeqCst));
+
+        supervisor.handle_event(r#"{"type":"connected","base_url":"https://example.com"}"#);
+        assert_eq!(supervisor.status().state, BridgeState::Unpaired);
+
+        supervisor.handle_event(r#"{"type":"connect_failed","message":"connection error"}"#);
+        assert_eq!(supervisor.status().state, BridgeState::Unpaired);
+
+        supervisor.handle_event(r#"{"type":"dead_credential","message":"revoked"}"#);
+        assert_eq!(supervisor.status().state, BridgeState::Unpaired);
+
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn worker_events_still_apply_normally_while_desired() {
+        // The gate above must not silently break the ordinary, non-race
+        // path: while the supervisor still wants the bridge running, a
+        // "connected" event must still land.
+        let app = tauri::test::mock_app();
+        let data_dir = test_data_dir("normal-event-applies");
+        let supervisor = Supervisor::new(app.handle().clone(), data_dir.clone()).unwrap();
+        supervisor.0.desired.store(true, Ordering::SeqCst);
+
+        supervisor.handle_event(r#"{"type":"connected","base_url":"https://example.com"}"#);
+
+        assert_eq!(supervisor.status().state, BridgeState::Connected);
         let _ = fs::remove_dir_all(data_dir);
     }
 

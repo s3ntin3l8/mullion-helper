@@ -104,7 +104,9 @@ export function App() {
         if (settings.launch_at_login) await enable(); else await disable();
       }
       setSettings(await api.saveSettings(settings));
-      setNotice(infoNotice("Settings saved. The bridge was restarted with the new configuration."));
+      // While unpaired there's no running worker for save_settings to
+      // restart -- saying so anyway would be actively wrong, not just vague.
+      setNotice(infoNotice(needsPairing ? "Settings saved." : "Settings saved. The bridge was restarted with the new configuration."));
     } catch (error) { setNotice(errorNotice(String(error))); } finally { setBusy(false); }
   }
   async function checkUpdates() {
