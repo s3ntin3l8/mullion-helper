@@ -241,17 +241,47 @@ impl<R: Runtime> Supervisor<R> {
     /// file is sufficient on its own: `run_loop`'s `inspect` check picks up
     /// `paired: false` on its next iteration and moves to `Unpaired`, but
     /// setting the status here too means the UI updates immediately rather
-    /// than waiting for that poll.
+    /// than waiting for that poll. `ssh-agent-bridge.json` is the worker's
+    /// *only* persisted state — `saveCredential` in helper.mjs is the sole
+    /// write site, shared by `pair` and session renewal — so deleting it is
+    /// a complete, not partial, unpair.
     pub fn unpair(&self) -> Result<BridgeStatus, String> {
         self.0.desired.store(false, Ordering::SeqCst);
         self.stop_child();
         let credential_path = self.0.data_dir.join("worker/ssh-agent-bridge.json");
-        match fs::remove_file(&credential_path) {
-            Ok(()) => {}
+        if let Err(error) = fs::remove_file(&credential_path) {
             // Already unpaired (or never paired): treat as success rather
             // than surfacing an error for a state the caller already wants.
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.to_string()),
+            if error.kind() != std::io::ErrorKind::NotFound {
+                // Leaving the previous status (e.g. Connected/Reconnecting)
+                // in place here would be actively wrong: desired is already
+                // false and the child is already stopped, so nothing is
+                // running regardless of whether the delete succeeded. An
+                // error here means the credential might still be on disk,
+                // so report Error rather than claiming Unpaired.
+                let message = error.to_string();
+                self.set_status(BridgeStatus::new(BridgeState::Error, Some(message.clone())));
+                return Err(message);
+            }
+        }
+        // A never-completed legacy-tool migration (imported at startup but
+        // never reached a successful `connected` event -- e.g. a
+        // paired-but-unreachable install, the exact shape of the outage
+        // this command exists to recover from) leaves the marker file
+        // unwritten and the original legacy credential untouched on disk.
+        // Without finishing it here, the next launch's
+        // `import_legacy_credential` would silently re-copy that same
+        // credential right back into the file just deleted above --
+        // undoing this unpair on restart. Treat "the user unpaired" as
+        // equivalent to "migration complete": finish it now, the same way
+        // a successful connect already does in `handle_event`.
+        if let Some(state) = self.0.app.try_state::<MigrationState>() {
+            if let Some(migration) = state.0.lock().expect("migration mutex poisoned").take() {
+                if let Err(error) = migration.commit() {
+                    self.set_status(BridgeStatus::new(BridgeState::Error, Some(error.clone())));
+                    return Err(error);
+                }
+            }
         }
         self.set_status(BridgeStatus::new(BridgeState::Unpaired, None));
         Ok(self.status())
@@ -787,6 +817,19 @@ mod tests {
     }
 
     #[test]
+    fn unpair_stops_a_running_child_before_deleting_the_credential() {
+        let app = tauri::test::mock_app();
+        let data_dir = test_data_dir("unpair-stops-child");
+        let supervisor = Supervisor::new(app.handle().clone(), data_dir.clone()).unwrap();
+        *supervisor.0.child.lock().unwrap() = Some(sleeping_child());
+
+        supervisor.unpair().expect("unpair should succeed");
+
+        assert!(supervisor.0.child.lock().unwrap().is_none());
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
     fn unpair_deletes_the_credential_and_reports_unpaired() {
         let app = tauri::test::mock_app();
         let data_dir = test_data_dir("unpair");
@@ -815,6 +858,55 @@ mod tests {
 
         assert_eq!(status.state, BridgeState::Unpaired);
         let _ = fs::remove_dir_all(data_dir);
+    }
+
+    // Regression for the migration-durability warning Hermes review round 2
+    // flagged on PR #47: a legacy-tool credential imported at startup but
+    // never committed (because the bridge never reached a successful
+    // "connected" event -- the exact shape of a paired-but-unreachable
+    // install) left no marker file. Without unpair() finishing that pending
+    // migration, the next launch's import_legacy_credential would silently
+    // re-copy the same credential the user just unpaired right back into
+    // the file unpair() just deleted, undoing the unpair on restart.
+    #[test]
+    #[cfg(not(windows))]
+    fn unpair_completes_a_pending_legacy_migration_so_a_relaunch_cannot_resurrect_it() {
+        let _lock = AGENT_ENV_LOCK.lock().unwrap();
+        let app = tauri::test::mock_app();
+        let data_dir = test_data_dir("unpair-migration");
+        fs::create_dir_all(&data_dir).unwrap();
+        let legacy_home = test_data_dir("unpair-migration-legacy-home");
+        let legacy_dir = legacy_home.join(".local/state/mullion");
+        fs::create_dir_all(&legacy_dir).unwrap();
+        fs::write(
+            legacy_dir.join("ssh-agent-bridge.json"),
+            br#"{"baseUrl":"https://example.com","bridgeId":"123e4567-e89b-12d3-a456-426614174000","sessionId":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}"#,
+        )
+        .unwrap();
+        let _home_guard = EnvVarGuard::set("HOME", legacy_home.to_str().unwrap());
+        let _xdg_guard = EnvVarGuard::unset("XDG_STATE_HOME");
+
+        let pending = crate::migration::import_legacy_credential(&data_dir)
+            .expect("a valid legacy credential should produce a pending migration");
+        // Simulates what lib.rs's setup() does: the pending migration sits
+        // in managed state, uncommitted, because should_start was false
+        // (or the app was closed) before a "connected" event ever fired.
+        app.manage(crate::migration::MigrationState(Mutex::new(Some(pending))));
+        let supervisor = Supervisor::new(app.handle().clone(), data_dir.clone()).unwrap();
+
+        supervisor.unpair().expect("unpair should succeed");
+
+        assert!(
+            data_dir.join("legacy-migration.json").exists(),
+            "unpair must finish the pending migration so a relaunch can't re-import it"
+        );
+        assert!(
+            crate::migration::import_legacy_credential(&data_dir).is_none(),
+            "a relaunch must not resurrect the credential the user just unpaired"
+        );
+
+        let _ = fs::remove_dir_all(&data_dir);
+        let _ = fs::remove_dir_all(&legacy_home);
     }
 
     #[test]
