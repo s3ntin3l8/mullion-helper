@@ -142,9 +142,16 @@ fn show_main(app: &tauri::AppHandle) {
     // app — the same thing 1Password and similar tray utilities do), and
     // explicitly revert to Accessory in the close handler below, rather
     // than relying on an implicit revert that has proven not to happen.
-    #[cfg(target_os = "macos")]
-    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
     if let Some(window) = app.get_webview_window("main") {
+        // Inside the if-let, not before it: if there's no window to show
+        // (not yet created, or mid-teardown), there is also no
+        // CloseRequested event coming to revert this — flipping to Regular
+        // unconditionally could leave the app stuck there with nothing to
+        // undo it.
+        #[cfg(target_os = "macos")]
+        if let Err(error) = app.set_activation_policy(tauri::ActivationPolicy::Regular) {
+            log::warn!("could not switch to the Regular activation policy: {error}");
+        }
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
@@ -208,9 +215,12 @@ pub fn run() {
                 // comment there) — this is the revert that plain Accessory
                 // policy alone was observed not to perform on its own.
                 #[cfg(target_os = "macos")]
-                let _ = window
+                if let Err(error) = window
                     .app_handle()
-                    .set_activation_policy(tauri::ActivationPolicy::Accessory);
+                    .set_activation_policy(tauri::ActivationPolicy::Accessory)
+                {
+                    log::warn!("could not switch back to the Accessory activation policy: {error}");
+                }
             }
         })
         .setup(|app| {
