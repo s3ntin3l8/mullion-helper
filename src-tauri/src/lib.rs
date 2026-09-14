@@ -127,7 +127,31 @@ fn updater_builder(app: &tauri::AppHandle) -> tauri_plugin_updater::UpdaterBuild
 }
 
 fn show_main(app: &tauri::AppHandle) {
+    // Confirmed in the field (PR #45's follow-up): merely *leaving* the
+    // policy at Accessory while calling window.set_focus() is not enough —
+    // focusing a window still implicitly promotes the app's Dock presence
+    // at the AppKit level, and that promotion does not revert on its own
+    // once the window is later hidden, so the Dock icon gets stuck showing
+    // indefinitely until the user manually removes it. This is a known
+    // Tauri/AppKit interaction with no clean "stay Accessory but still let
+    // the window focus normally" fix — see the community-documented
+    // workaround at https://github.com/tauri-apps/tauri/discussions/10774.
+    // Embrace it instead of fighting it: explicitly go Regular for the
+    // period the window is actually visible (a transient Dock icon while
+    // the window is open is expected, normal behavior for a menu-bar-style
+    // app — the same thing 1Password and similar tray utilities do), and
+    // explicitly revert to Accessory in the close handler below, rather
+    // than relying on an implicit revert that has proven not to happen.
     if let Some(window) = app.get_webview_window("main") {
+        // Inside the if-let, not before it: if there's no window to show
+        // (not yet created, or mid-teardown), there is also no
+        // CloseRequested event coming to revert this — flipping to Regular
+        // unconditionally could leave the app stuck there with nothing to
+        // undo it.
+        #[cfg(target_os = "macos")]
+        if let Err(error) = app.set_activation_policy(tauri::ActivationPolicy::Regular) {
+            log::warn!("could not switch to the Regular activation policy: {error}");
+        }
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
@@ -187,6 +211,16 @@ pub fn run() {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
+                // Undo show_main()'s explicit Regular switch (see the
+                // comment there) — this is the revert that plain Accessory
+                // policy alone was observed not to perform on its own.
+                #[cfg(target_os = "macos")]
+                if let Err(error) = window
+                    .app_handle()
+                    .set_activation_policy(tauri::ActivationPolicy::Accessory)
+                {
+                    log::warn!("could not switch back to the Accessory activation policy: {error}");
+                }
             }
         })
         .setup(|app| {
