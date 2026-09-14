@@ -544,27 +544,84 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), String>
     fs::rename(temporary, path).map_err(|error| error.to_string())
 }
 
+/// True for Apple's on-demand per-session ssh-agent socket
+/// (`/private/tmp/com.apple.launchd.<id>/Listeners`), created for every GUI
+/// login on macOS. It exists for the whole session and reports zero
+/// identities unless the user explicitly ran `ssh-add --apple-use-keychain`
+/// — so `resolve_agent_socket` must not trust it over a real agent like
+/// 1Password just because `SSH_AUTH_SOCK` happens to point at it (a GUI
+/// app, including this one under its LaunchAgent, inherits it from launchd
+/// regardless of whether 1Password is also running). Reported symptom: the
+/// bridge showed `connected` while forwarding zero keys.
+///
+/// The path shape is unambiguous on any platform (no non-Apple system ever
+/// produces it), so this is checked unconditionally rather than gated on
+/// `cfg!(target_os = "macos")` — which also means the regression test below
+/// exercises the real code path on Linux CI instead of silently no-op'ing.
+fn is_macos_launchd_socket(path: &str) -> bool {
+    path.starts_with("/private/tmp/com.apple.launchd.") && path.ends_with("/Listeners")
+}
+
+/// Pure decision core of `resolve_agent_socket`'s auto-detect path, kept
+/// separate so the ranking itself is testable with plain values — no env
+/// vars, no filesystem, and in particular no need to fake a file at
+/// `/private/tmp/com.apple.launchd.*/Listeners` just to exercise the
+/// deferral (which isn't even possible to do safely and portably in a unit
+/// test on a non-macOS CI runner).
+///
+/// `env_sock_exists` and `first_existing_1password` are pre-resolved by the
+/// caller (real `Path::exists()` checks); this function only decides
+/// precedence. Order: a non-launchd, existing `SSH_AUTH_SOCK` wins; else the
+/// first existing 1Password candidate; else the (launchd) `SSH_AUTH_SOCK`
+/// anyway if it exists — connecting to *something* beats reporting
+/// `AgentUnavailable`, matching the Windows branch's unconditional trust of
+/// `SSH_AUTH_SOCK` just above this function's call site. Please don't
+/// "simplify" this last fallback away — it's intentional, see the tests.
+fn pick_auto_detected_socket(
+    env_sock: Option<&str>,
+    env_sock_exists: bool,
+    first_existing_1password: Option<&str>,
+) -> Option<String> {
+    let env_is_launchd = env_sock.is_some_and(is_macos_launchd_socket);
+    if env_sock_exists && !env_is_launchd {
+        return env_sock.map(str::to_owned);
+    }
+    if let Some(path) = first_existing_1password {
+        return Some(path.to_owned());
+    }
+    env_sock.filter(|_| env_sock_exists).map(str::to_owned)
+}
+
 fn resolve_agent_socket(settings: &Settings) -> Option<String> {
     if !settings.ssh_auth_sock.trim().is_empty() {
         return Some(settings.ssh_auth_sock.clone());
     }
-    if let Ok(value) = env::var("SSH_AUTH_SOCK") {
-        if cfg!(windows) || Path::new(&value).exists() {
-            return Some(value);
-        }
-    }
+    let env_sock = env::var("SSH_AUTH_SOCK").ok();
     if cfg!(windows) {
-        return Some(WINDOWS_AGENT_PIPE.into());
+        // Unlike the Unix branch below, this is a deliberate unconditional
+        // trust with no existence check — an out-of-scope asymmetry left
+        // for a follow-up PR alongside probing agents for real identities.
+        return env_sock.or_else(|| Some(WINDOWS_AGENT_PIPE.into()));
     }
-    let home = env::var_os("HOME").map(PathBuf::from)?;
-    let candidates = [
-        home.join("Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock"),
-        home.join(".1password/agent.sock"),
-    ];
-    candidates
-        .into_iter()
-        .find(|path| path.exists())
-        .map(|path| path.to_string_lossy().into_owned())
+    let env_sock_exists = env_sock
+        .as_deref()
+        .is_some_and(|value| Path::new(value).exists());
+    let first_existing_1password = env::var_os("HOME")
+        .map(PathBuf::from)
+        .and_then(|home| {
+            [
+                home.join("Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock"),
+                home.join(".1password/agent.sock"),
+            ]
+            .into_iter()
+            .find(|path| path.exists())
+        })
+        .map(|path| path.to_string_lossy().into_owned());
+    pick_auto_detected_socket(
+        env_sock.as_deref(),
+        env_sock_exists,
+        first_existing_1password.as_deref(),
+    )
 }
 
 fn worker_path() -> Result<PathBuf, String> {
@@ -713,6 +770,176 @@ mod tests {
             Some("/tmp/custom-agent.sock")
         );
     }
+
+    #[test]
+    fn recognizes_the_macos_launchd_socket_shape() {
+        assert!(is_macos_launchd_socket(
+            "/private/tmp/com.apple.launchd.ABC123xyz/Listeners"
+        ));
+        // A non-launchd SSH_AUTH_SOCK must not be misclassified — that
+        // would defer a perfectly good agent for no reason.
+        assert!(!is_macos_launchd_socket("/tmp/ssh-AbCdEf/agent.12345"));
+        assert!(!is_macos_launchd_socket(
+            "/Users/me/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock"
+        ));
+    }
+
+    // The real regression tests for the reported bug: `pick_auto_detected_
+    // socket` is pure, so these use plain literals rather than faking a
+    // file at `/private/tmp/com.apple.launchd.*/Listeners` — which isn't
+    // even possible to do portably in a test that might run on Linux CI.
+    const LAUNCHD_SOCK: &str = "/private/tmp/com.apple.launchd.ABC123xyz/Listeners";
+    const ONEPASSWORD_SOCK: &str =
+        "/Users/me/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock";
+
+    #[test]
+    fn reported_bug_launchd_socket_present_defers_to_1password() {
+        assert_eq!(
+            pick_auto_detected_socket(Some(LAUNCHD_SOCK), true, Some(ONEPASSWORD_SOCK)),
+            Some(ONEPASSWORD_SOCK.to_owned())
+        );
+    }
+
+    #[test]
+    fn a_real_non_launchd_sock_still_wins_over_1password() {
+        assert_eq!(
+            pick_auto_detected_socket(
+                Some("/tmp/ssh-AbCdEf/agent.12345"),
+                true,
+                Some(ONEPASSWORD_SOCK)
+            ),
+            Some("/tmp/ssh-AbCdEf/agent.12345".to_owned())
+        );
+    }
+
+    #[test]
+    fn launchd_socket_is_the_last_resort_fallback() {
+        // No 1Password candidate found (e.g. HOME unset, or 1Password not
+        // installed): fall back to the launchd socket rather than
+        // AgentUnavailable — connecting to something beats nothing.
+        assert_eq!(
+            pick_auto_detected_socket(Some(LAUNCHD_SOCK), true, None),
+            Some(LAUNCHD_SOCK.to_owned())
+        );
+    }
+
+    #[test]
+    fn a_stale_env_sock_that_does_not_exist_is_ignored() {
+        // SSH_AUTH_SOCK set but dangling (e.g. dead forwarded socket): fall
+        // straight through to 1Password rather than the last-resort branch,
+        // matching pre-existing behavior for a non-launchd dangling socket.
+        assert_eq!(
+            pick_auto_detected_socket(Some("/tmp/dead.sock"), false, Some(ONEPASSWORD_SOCK)),
+            Some(ONEPASSWORD_SOCK.to_owned())
+        );
+        assert_eq!(
+            pick_auto_detected_socket(Some("/tmp/dead.sock"), false, None),
+            None
+        );
+    }
+
+    #[test]
+    fn no_env_sock_falls_through_to_1password_or_none() {
+        assert_eq!(
+            pick_auto_detected_socket(None, false, Some(ONEPASSWORD_SOCK)),
+            Some(ONEPASSWORD_SOCK.to_owned())
+        );
+        assert_eq!(pick_auto_detected_socket(None, false, None), None);
+    }
+
+    // `resolve_agent_socket` auto-detect reads process-global env vars
+    // (`SSH_AUTH_SOCK`, `HOME`), and `cargo test` runs tests in parallel by
+    // default — every test below that touches either takes this lock so
+    // runs can't interleave and observe a value neither of them set. Any
+    // future test touching these two env vars must take it as well.
+    static AGENT_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = env::var(key).ok();
+            env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let previous = env::var(key).ok();
+            env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => env::set_var(self.key, value),
+                None => env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn write_fake_1password_socket(home: &Path) -> PathBuf {
+        let socket = home.join("Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock");
+        fs::create_dir_all(socket.parent().unwrap()).unwrap();
+        fs::write(&socket, b"").unwrap();
+        socket
+    }
+
+    // These two exercise `resolve_agent_socket`'s *wiring* — reading
+    // `SSH_AUTH_SOCK`/`HOME` and building the real 1Password candidate
+    // paths — on top of the ranking already proven purely above. (A
+    // wiring test can't itself fake a launchd socket that `exists()`
+    // without writing to the real `/private/tmp`, which isn't possible
+    // portably in a unit test — that's exactly why the ranking has its own
+    // pure tests instead.) Both take `AGENT_ENV_LOCK` since they mutate
+    // process-global env vars and `cargo test` runs in parallel by default.
+    #[test]
+    #[cfg(not(windows))]
+    fn resolve_agent_socket_finds_1password_via_home_when_env_sock_is_unset() {
+        let _lock = AGENT_ENV_LOCK.lock().unwrap();
+        let home = test_data_dir("agent-home-wiring");
+        fs::create_dir_all(&home).unwrap();
+        let onepassword_sock = write_fake_1password_socket(&home);
+        let _home_guard = EnvVarGuard::set("HOME", home.to_str().unwrap());
+        let _sock_guard = EnvVarGuard::unset("SSH_AUTH_SOCK");
+
+        let settings = Settings::default();
+        assert_eq!(
+            resolve_agent_socket(&settings).as_deref(),
+            onepassword_sock.to_str()
+        );
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn a_real_ssh_auth_sock_still_wins_over_1password() {
+        let _lock = AGENT_ENV_LOCK.lock().unwrap();
+        let home = test_data_dir("agent-home-real-sock");
+        fs::create_dir_all(&home).unwrap();
+        write_fake_1password_socket(&home);
+        let _home_guard = EnvVarGuard::set("HOME", home.to_str().unwrap());
+        // A real, existing, non-launchd-shaped SSH_AUTH_SOCK (e.g. a
+        // forwarded agent socket) must not be second-guessed just because
+        // 1Password also happens to be present.
+        let real_sock = home.join("real-agent.sock");
+        fs::write(&real_sock, b"").unwrap();
+        let _sock_guard = EnvVarGuard::set("SSH_AUTH_SOCK", real_sock.to_str().unwrap());
+
+        let settings = Settings::default();
+        assert_eq!(
+            resolve_agent_socket(&settings).as_deref(),
+            real_sock.to_str()
+        );
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
     #[test]
     fn status_names_are_stable() {
         assert_eq!(
