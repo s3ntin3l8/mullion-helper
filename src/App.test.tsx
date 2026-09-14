@@ -94,4 +94,19 @@ describe("Mullion Helper window", () => {
     await screen.findByText("Connect this computer");
     expect(screen.queryByText("Remove this computer's pairing?")).not.toBeInTheDocument();
   });
+
+  it("collapses the unpair confirm row even when the unpair call itself fails", async () => {
+    const user = userEvent.setup();
+    mockApi.status.mockResolvedValueOnce(connectedStatus);
+    mockApi.unpair.mockRejectedValueOnce(new Error("worker unreachable"));
+    render(<App />);
+
+    await screen.findByText("Bridge connected");
+    await user.click(screen.getByRole("button", { name: "Unpair this computer" }));
+    await user.click(screen.getByRole("button", { name: "Unpair" }));
+
+    await screen.findByRole("alert");
+    expect(screen.queryByText("Remove this computer's pairing?")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Unpair this computer" })).toBeVisible();
+  });
 });

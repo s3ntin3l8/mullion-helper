@@ -278,8 +278,17 @@ impl<R: Runtime> Supervisor<R> {
         if let Some(state) = self.0.app.try_state::<MigrationState>() {
             if let Some(migration) = state.0.lock().expect("migration mutex poisoned").take() {
                 if let Err(error) = migration.commit() {
-                    self.set_status(BridgeStatus::new(BridgeState::Error, Some(error.clone())));
-                    return Err(error);
+                    // Unlike the delete failure above, the credential is
+                    // *confirmed* gone by this point — commit() only
+                    // failed at a best-effort legacy-service cleanup step
+                    // (or the marker write), not at anything that leaves
+                    // the bridge itself paired. Reporting Error here would
+                    // be a false alarm: the machine genuinely is unpaired,
+                    // so say that and surface the cleanup failure as detail
+                    // rather than routing to the tray's "needs attention"
+                    // presentation for a problem that isn't one.
+                    self.set_status(BridgeStatus::new(BridgeState::Unpaired, Some(error)));
+                    return Ok(self.status());
                 }
             }
         }

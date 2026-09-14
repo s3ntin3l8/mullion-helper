@@ -90,10 +90,16 @@ export function App() {
   }
   async function unpair() {
     await act(async () => {
-      const result = await api.unpair();
-      await refresh();
-      setConfirmingUnpair(false);
-      return result;
+      try {
+        const result = await api.unpair();
+        await refresh();
+        return result;
+      } finally {
+        // Reset the confirm row on rejection too -- otherwise it stays
+        // expanded over a machine that may already be unpaired (act()'s
+        // catch only sets an error notice, it doesn't touch this state).
+        setConfirmingUnpair(false);
+      }
     });
   }
   async function save() {
