@@ -581,7 +581,7 @@ fn is_macos_launchd_socket(path: &str) -> bool {
     path.ends_with("/Listeners")
         && path
             .rsplit('/')
-            .nth(1)
+            .nth(1) // the segment before the "Listeners" leaf, i.e. the parent dir name
             .is_some_and(|segment| segment.starts_with("com.apple.launchd."))
 }
 
