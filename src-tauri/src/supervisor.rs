@@ -544,30 +544,52 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), String>
     fs::rename(temporary, path).map_err(|error| error.to_string())
 }
 
-/// True for Apple's on-demand per-session ssh-agent socket
-/// (`/private/tmp/com.apple.launchd.<id>/Listeners`), created for every GUI
-/// login on macOS. It exists for the whole session and reports zero
-/// identities unless the user explicitly ran `ssh-add --apple-use-keychain`
-/// — so `resolve_agent_socket` must not trust it over a real agent like
-/// 1Password just because `SSH_AUTH_SOCK` happens to point at it (a GUI
-/// app, including this one under its LaunchAgent, inherits it from launchd
-/// regardless of whether 1Password is also running). Reported symptom: the
-/// bridge showed `connected` while forwarding zero keys.
+/// True for Apple's on-demand per-session ssh-agent socket, created for
+/// every GUI login on macOS. It exists for the whole session and reports
+/// zero identities unless the user explicitly ran `ssh-add
+/// --apple-use-keychain` — so `resolve_agent_socket` must not trust it over
+/// a real agent like 1Password just because `SSH_AUTH_SOCK` happens to
+/// point at it (a GUI app, including this one under its LaunchAgent,
+/// inherits it from launchd regardless of whether 1Password is also
+/// running). Reported symptom: the bridge showed `connected` while
+/// forwarding zero keys.
+///
+/// The socket always lives at `<some launchd-owned dir>/com.apple.launchd.
+/// <opaque-id>/Listeners` — matched here by the last two path segments,
+/// NOT a hardcoded directory prefix. An earlier version of this function
+/// checked for a literal `/private/tmp/` prefix on the theory that this is
+/// always where the socket lives; `launchctl getenv SSH_AUTH_SOCK` on a
+/// real reporting machine came back `/var/run/com.apple.launchd.<id>/
+/// Listeners` instead, which that prefix check silently failed to match —
+/// so the very bug this function exists to fix was still live after that
+/// version merged. Match on shape, not location.
 ///
 /// The path shape is unambiguous on any platform (no non-Apple system ever
-/// produces it), so this is checked unconditionally rather than gated on
-/// `cfg!(target_os = "macos")` — which also means the regression test below
-/// exercises the real code path on Linux CI instead of silently no-op'ing.
+/// produces a `com.apple.launchd.*` path segment), so this is checked
+/// unconditionally rather than gated on `cfg!(target_os = "macos")` —
+/// which also means the regression tests below exercise the real code path
+/// on Linux CI instead of silently no-op'ing.
+///
+/// A trailing slash is trimmed before matching. launchd doesn't hand out
+/// `SSH_AUTH_SOCK` with one, so this isn't reachable today, but the
+/// direction this function fails open in matters: a false negative here
+/// means trusting the empty launchd agent over 1Password again — the exact
+/// bug class this function exists to prevent — so it's worth the one line
+/// even for an input shape nothing currently produces.
 fn is_macos_launchd_socket(path: &str) -> bool {
-    path.starts_with("/private/tmp/com.apple.launchd.") && path.ends_with("/Listeners")
+    let path = path.trim_end_matches('/');
+    path.ends_with("/Listeners")
+        && path
+            .rsplit('/')
+            .nth(1) // the segment before the "Listeners" leaf, i.e. the parent dir name
+            .is_some_and(|segment| segment.starts_with("com.apple.launchd."))
 }
 
 /// Pure decision core of `resolve_agent_socket`'s auto-detect path, kept
 /// separate so the ranking itself is testable with plain values — no env
-/// vars, no filesystem, and in particular no need to fake a file at
-/// `/private/tmp/com.apple.launchd.*/Listeners` just to exercise the
-/// deferral (which isn't even possible to do safely and portably in a unit
-/// test on a non-macOS CI runner).
+/// vars, no filesystem, and in particular no need to fake a real launchd
+/// socket file just to exercise the deferral (which isn't even possible to
+/// do safely and portably in a unit test on a non-macOS CI runner).
 ///
 /// `env_sock_exists` and `first_existing_1password` are pre-resolved by the
 /// caller (real `Path::exists()` checks); this function only decides
@@ -773,6 +795,16 @@ mod tests {
 
     #[test]
     fn recognizes_the_macos_launchd_socket_shape() {
+        // Confirmed via `launchctl getenv SSH_AUTH_SOCK` on the reporting
+        // machine -- the value the earlier, prefix-based version of
+        // `is_macos_launchd_socket` failed to match (see its doc comment).
+        assert!(is_macos_launchd_socket(
+            "/var/run/com.apple.launchd.oLcNuPYLZu/Listeners"
+        ));
+        // The directory this was originally (incorrectly) assumed to
+        // always live under. Also still a launchd socket -- keep both
+        // shapes covered since which one macOS hands out isn't something
+        // this code controls.
         assert!(is_macos_launchd_socket(
             "/private/tmp/com.apple.launchd.ABC123xyz/Listeners"
         ));
@@ -782,13 +814,28 @@ mod tests {
         assert!(!is_macos_launchd_socket(
             "/Users/me/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock"
         ));
+        // A path that merely contains the substring, rather than having it
+        // as the actual parent directory segment, must not match.
+        assert!(!is_macos_launchd_socket(
+            "/tmp/not-com.apple.launchd.fake/Listeners"
+        ));
+        assert!(!is_macos_launchd_socket(
+            "/var/run/com.apple.launchd.oLcNuPYLZu/NotListeners"
+        ));
+        // A trailing slash must not defeat the match — a false negative
+        // here means trusting an empty agent over 1Password again.
+        assert!(is_macos_launchd_socket(
+            "/var/run/com.apple.launchd.oLcNuPYLZu/Listeners/"
+        ));
     }
 
     // The real regression tests for the reported bug: `pick_auto_detected_
     // socket` is pure, so these use plain literals rather than faking a
-    // file at `/private/tmp/com.apple.launchd.*/Listeners` — which isn't
-    // even possible to do portably in a test that might run on Linux CI.
-    const LAUNCHD_SOCK: &str = "/private/tmp/com.apple.launchd.ABC123xyz/Listeners";
+    // real launchd socket file — which isn't even possible to do portably
+    // in a test that might run on Linux CI. This is the exact value
+    // confirmed via `launchctl getenv SSH_AUTH_SOCK` on the reporting
+    // machine, not a guessed shape.
+    const LAUNCHD_SOCK: &str = "/var/run/com.apple.launchd.oLcNuPYLZu/Listeners";
     const ONEPASSWORD_SOCK: &str =
         "/Users/me/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock";
 
