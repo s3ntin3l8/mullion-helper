@@ -278,17 +278,31 @@ impl<R: Runtime> Supervisor<R> {
         if let Some(state) = self.0.app.try_state::<MigrationState>() {
             if let Some(migration) = state.0.lock().expect("migration mutex poisoned").take() {
                 if let Err(error) = migration.commit() {
-                    // Unlike the delete failure above, the credential is
-                    // *confirmed* gone by this point — commit() only
-                    // failed at a best-effort legacy-service cleanup step
-                    // (or the marker write), not at anything that leaves
-                    // the bridge itself paired. Reporting Error here would
-                    // be a false alarm: the machine genuinely is unpaired,
-                    // so say that and surface the cleanup failure as detail
-                    // rather than routing to the tray's "needs attention"
-                    // presentation for a problem that isn't one.
-                    self.set_status(BridgeStatus::new(BridgeState::Unpaired, Some(error)));
-                    return Ok(self.status());
+                    // commit() collapses two different failure modes into
+                    // one Result: disabling the legacy service (which runs
+                    // FIRST and short-circuits the rest via `?`) failing,
+                    // and the marker write itself failing. Don't assume
+                    // which one happened — check. If the marker genuinely
+                    // wasn't written, the exact resurrection risk this
+                    // whole block exists to close is still open on the
+                    // next launch, which is worth surfacing loudly (Error)
+                    // rather than as an easy-to-miss detail string. Only
+                    // treat it as a benign cleanup hiccup if the marker
+                    // exists despite the reported error.
+                    let marker_written = self.0.data_dir.join("legacy-migration.json").exists();
+                    self.set_status(BridgeStatus::new(
+                        if marker_written {
+                            BridgeState::Unpaired
+                        } else {
+                            BridgeState::Error
+                        },
+                        Some(error.clone()),
+                    ));
+                    return if marker_written {
+                        Ok(self.status())
+                    } else {
+                        Err(error)
+                    };
                 }
             }
         }
@@ -465,6 +479,18 @@ impl<R: Runtime> Supervisor<R> {
                         state.0.lock().expect("migration mutex poisoned").take()
                     {
                         if let Err(error) = migration.commit() {
+                            // Unlike unpair()'s commit()-failure handling
+                            // below, this is always Error, unconditionally
+                            // — deliberately not mirroring unpair()'s
+                            // "check whether the marker actually landed"
+                            // nuance. Here the user's intent (be connected,
+                            // with a clean, committed migration) failed
+                            // outright: the bridge is stopped in response.
+                            // In unpair()'s case the user's intent
+                            // (be unpaired) already succeeded regardless of
+                            // this failure — the only question is whether a
+                            // *future* restart is still safe, which is what
+                            // that check answers.
                             self.0.desired.store(false, Ordering::SeqCst);
                             self.stop_child();
                             self.set_status(BridgeStatus::new(BridgeState::Error, Some(error)));
@@ -913,6 +939,61 @@ mod tests {
             crate::migration::import_legacy_credential(&data_dir).is_none(),
             "a relaunch must not resurrect the credential the user just unpaired"
         );
+
+        let _ = fs::remove_dir_all(&data_dir);
+        let _ = fs::remove_dir_all(&legacy_home);
+    }
+
+    // Regression for the round-4 note on PR #47: commit() collapses two
+    // different failure modes into one Result, and disable_legacy_service()
+    // running first (short-circuiting the marker write via `?`) means BOTH
+    // failure modes leave the marker unwritten today. unpair() must not
+    // assume a commit() failure is benign just because the credential was
+    // already deleted -- it has to check whether the marker actually landed.
+    #[test]
+    #[cfg(not(windows))]
+    fn unpair_reports_error_if_the_migration_marker_was_not_actually_written() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _lock = AGENT_ENV_LOCK.lock().unwrap();
+        let app = tauri::test::mock_app();
+        let data_dir = test_data_dir("unpair-migration-marker-fails");
+        fs::create_dir_all(&data_dir).unwrap();
+        let legacy_home = test_data_dir("unpair-migration-marker-fails-legacy-home");
+        let legacy_dir = legacy_home.join(".local/state/mullion");
+        fs::create_dir_all(&legacy_dir).unwrap();
+        fs::write(
+            legacy_dir.join("ssh-agent-bridge.json"),
+            br#"{"baseUrl":"https://example.com","bridgeId":"123e4567-e89b-12d3-a456-426614174000","sessionId":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}"#,
+        )
+        .unwrap();
+        let _home_guard = EnvVarGuard::set("HOME", legacy_home.to_str().unwrap());
+        let _xdg_guard = EnvVarGuard::unset("XDG_STATE_HOME");
+
+        let pending = crate::migration::import_legacy_credential(&data_dir)
+            .expect("a valid legacy credential should produce a pending migration");
+        app.manage(crate::migration::MigrationState(Mutex::new(Some(pending))));
+        let supervisor = Supervisor::new(app.handle().clone(), data_dir.clone()).unwrap();
+
+        // Make the marker write fail: on Linux, disable_legacy_service() is
+        // a no-op Ok(()), so this is the only way commit() can fail here.
+        let mut permissions = fs::metadata(&data_dir).unwrap().permissions();
+        permissions.set_mode(0o500);
+        fs::set_permissions(&data_dir, permissions).unwrap();
+
+        let result = supervisor.unpair();
+
+        // Restore write access before any cleanup that needs it.
+        let mut permissions = fs::metadata(&data_dir).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&data_dir, permissions).unwrap();
+
+        assert!(
+            result.is_err(),
+            "a commit() failure that left the marker unwritten must surface as an error, not a silent success"
+        );
+        assert_eq!(supervisor.status().state, BridgeState::Error);
+        assert!(!data_dir.join("legacy-migration.json").exists());
 
         let _ = fs::remove_dir_all(&data_dir);
         let _ = fs::remove_dir_all(&legacy_home);

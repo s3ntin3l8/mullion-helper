@@ -95,9 +95,14 @@ describe("Mullion Helper window", () => {
     expect(screen.queryByText("Remove this computer's pairing?")).not.toBeInTheDocument();
   });
 
-  it("collapses the unpair confirm row even when the unpair call itself fails", async () => {
+  it("collapses the unpair confirm row and refreshes the stale status when the unpair call itself fails", async () => {
     const user = userEvent.setup();
-    mockApi.status.mockResolvedValueOnce(connectedStatus);
+    // By the time unpair() can reject, the backend has already stopped
+    // everything -- simulate it reporting that via the post-rejection
+    // refresh, rather than leaving the pre-unpair "connected" status
+    // showing as if nothing had changed.
+    const errorStatus: BridgeStatus = { state: "error", base_url: null, bridge_id: null, detail: "could not record completion of the legacy migration", retry_in_ms: null, updated_at: new Date().toISOString() };
+    mockApi.status.mockResolvedValueOnce(connectedStatus).mockResolvedValueOnce(errorStatus);
     mockApi.unpair.mockRejectedValueOnce(new Error("worker unreachable"));
     render(<App />);
 
@@ -108,5 +113,9 @@ describe("Mullion Helper window", () => {
     await screen.findByRole("alert");
     expect(screen.queryByText("Remove this computer's pairing?")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Unpair this computer" })).toBeVisible();
+    // The refresh triggered by the rejection must have actually landed --
+    // the card should no longer be showing the stale pre-unpair status.
+    expect(await screen.findByText("Bridge needs attention")).toBeVisible();
+    expect(screen.queryByText("Bridge connected")).not.toBeInTheDocument();
   });
 });

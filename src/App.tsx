@@ -94,6 +94,17 @@ export function App() {
         const result = await api.unpair();
         await refresh();
         return result;
+      } catch (error) {
+        // The backend has already set desired=false and stopped the child
+        // by the time unpair() can throw, no matter which step inside it
+        // failed -- so the card showing the pre-unpair status (e.g. still
+        // "Bridge connected") is stale, not just pending. Refresh so it
+        // reflects what the backend now reports (likely Error, with the
+        // failure in detail) instead of a status that's already wrong.
+        // Swallow refresh's own failure so it can't replace the error
+        // act() is about to show as the notice.
+        await refresh().catch(() => {});
+        throw error;
       } finally {
         // Reset the confirm row on rejection too -- otherwise it stays
         // expanded over a machine that may already be unpaired (act()'s
