@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     env, fs,
-    io::{BufRead, BufReader, Write},
+    io::{self, BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     sync::{
@@ -18,6 +18,22 @@ use tauri::{AppHandle, Emitter, Manager, Runtime, Wry};
 
 const WINDOWS_AGENT_PIPE: &str = r"\\.\pipe\openssh-ssh-agent";
 const HEALTHY_CONNECTION_RESET_AFTER: Duration = Duration::from_secs(30);
+
+// Wire format for the probe this module speaks directly to a candidate SSH
+// agent -- entirely separate from the worker's own mux (see the doc comment
+// on `probe_agent` for why that separation is deliberate). Mirrors
+// src/worker/ssh-agent-protocol-v1.json: a 4-byte big-endian length prefix,
+// SSH_AGENTC_REQUEST_IDENTITIES = 11 (the only outbound type this probe ever
+// sends), SSH_AGENT_IDENTITIES_ANSWER = 12, and the same 256KiB frame cap.
+const REQUEST_IDENTITIES_FRAME: [u8; 5] = [0, 0, 0, 1, 11];
+const SSH_AGENT_IDENTITIES_ANSWER: u8 = 12;
+const MAX_AGENT_PROBE_FRAME_BYTES: usize = 262_144;
+// Local IPC (a Unix socket or a Windows named pipe already on disk) either
+// answers in single-digit milliseconds or is stuck -- this only needs to be
+// long enough to not misclassify a slow-but-alive agent (e.g. 1Password
+// waking up) as unreachable, not long enough to matter to a human waiting
+// for the app to start.
+const AGENT_PROBE_TIMEOUT: Duration = Duration::from_millis(750);
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -40,6 +56,13 @@ pub struct BridgeStatus {
     pub detail: Option<String>,
     pub retry_in_ms: Option<u64>,
     pub updated_at: String,
+    // Identity count from the most recent agent resolution, regardless of
+    // which BridgeState it's attached to -- see `set_status`, which stamps
+    // this onto every outgoing status from `Inner::agent_identities` rather
+    // than requiring each call site to know about it. `Some(0)` is the
+    // "connected but useless" case this exists to surface; `None` means no
+    // agent has been resolved yet (paused/unpaired) or the count is unknown.
+    pub agent_identities: Option<u32>,
 }
 
 impl BridgeStatus {
@@ -51,6 +74,7 @@ impl BridgeStatus {
             detail,
             retry_in_ms: None,
             updated_at: Utc::now().to_rfc3339(),
+            agent_identities: None,
         }
     }
 }
@@ -61,6 +85,16 @@ pub struct Settings {
     pub insecure: bool,
     #[serde(default)]
     pub launch_at_login: bool,
+}
+
+/// A candidate SSH agent endpoint offered to the user in Settings, and the
+/// same data `resolve_agent` uses internally to choose one automatically.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct AgentCandidate {
+    pub path: String,
+    pub label: &'static str,
+    pub reachable: bool,
+    pub identities: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -82,6 +116,7 @@ struct Inner<R: Runtime> {
     status: Mutex<BridgeStatus>,
     settings: Mutex<Settings>,
     connected_at: Mutex<Option<Instant>>,
+    agent_identities: Mutex<Option<u32>>,
 }
 
 pub struct Supervisor<R: Runtime = Wry>(Arc<Inner<R>>);
@@ -108,6 +143,7 @@ impl<R: Runtime> Supervisor<R> {
             status: Mutex::new(BridgeStatus::new(BridgeState::Unpaired, None)),
             settings: Mutex::new(settings),
             connected_at: Mutex::new(None),
+            agent_identities: Mutex::new(None),
         })))
     }
 
@@ -159,6 +195,14 @@ impl<R: Runtime> Supervisor<R> {
     pub fn pause(&self) -> BridgeStatus {
         self.0.desired.store(false, Ordering::SeqCst);
         self.stop_child();
+        // No agent is in active use while paused -- don't let set_status go
+        // on stamping a stale identity count onto a state where it no
+        // longer applies.
+        *self
+            .0
+            .agent_identities
+            .lock()
+            .expect("agent identities mutex poisoned") = None;
         self.set_status(BridgeStatus::new(BridgeState::Paused, None));
         self.status()
     }
@@ -248,6 +292,11 @@ impl<R: Runtime> Supervisor<R> {
     pub fn unpair(&self) -> Result<BridgeStatus, String> {
         self.0.desired.store(false, Ordering::SeqCst);
         self.stop_child();
+        *self
+            .0
+            .agent_identities
+            .lock()
+            .expect("agent identities mutex poisoned") = None;
         let credential_path = self.0.data_dir.join("worker/ssh-agent-bridge.json");
         if let Err(error) = fs::remove_file(&credential_path) {
             // Already unpaired (or never paired): treat as success rather
@@ -330,7 +379,7 @@ impl<R: Runtime> Supervisor<R> {
                 self.set_status(BridgeStatus::new(BridgeState::Unpaired, None));
                 continue;
             }
-            let socket = match resolve_agent_socket(&self.settings()) {
+            let resolution = match resolve_agent(&self.settings()) {
                 Some(value) => value,
                 None => {
                     self.set_status(BridgeStatus::new(BridgeState::AgentUnavailable, Some("No SSH agent socket was found. Open your SSH agent or configure its socket in Settings.".into())));
@@ -338,6 +387,20 @@ impl<R: Runtime> Supervisor<R> {
                     continue;
                 }
             };
+            log::info!(
+                "resolved SSH agent socket {} with {} identities",
+                resolution.path,
+                resolution
+                    .identities
+                    .map(|count| count.to_string())
+                    .unwrap_or_else(|| "unknown".into())
+            );
+            *self
+                .0
+                .agent_identities
+                .lock()
+                .expect("agent identities mutex poisoned") = resolution.identities;
+            let socket = resolution.path;
             let mut status = BridgeStatus::new(BridgeState::Starting, None);
             status.base_url = inspection.base_url;
             status.bridge_id = inspection.bridge_id;
@@ -586,7 +649,12 @@ impl<R: Runtime> Supervisor<R> {
         reap_child(&self.0.child);
     }
 
-    fn set_status(&self, status: BridgeStatus) {
+    fn set_status(&self, mut status: BridgeStatus) {
+        status.agent_identities = *self
+            .0
+            .agent_identities
+            .lock()
+            .expect("agent identities mutex poisoned");
         *self.0.status.lock().expect("status mutex poisoned") = status.clone();
         if let Some(tray_status) = self.0.app.try_state::<TrayStatus<R>>() {
             tray_status.update(&status);
@@ -694,65 +762,210 @@ fn is_macos_launchd_socket(path: &str) -> bool {
             .is_some_and(|segment| segment.starts_with("com.apple.launchd."))
 }
 
-/// Pure decision core of `resolve_agent_socket`'s auto-detect path, kept
-/// separate so the ranking itself is testable with plain values — no env
-/// vars, no filesystem, and in particular no need to fake a real launchd
-/// socket file just to exercise the deferral (which isn't even possible to
-/// do safely and portably in a unit test on a non-macOS CI runner).
+/// Builds the ordered list of auto-detect candidates -- paths and their
+/// display labels only, no reachability or identity information yet, that's
+/// `probe_candidates`' job. Order is the precedence `choose_best` falls back
+/// through when nothing reports identities: a non-launchd `SSH_AUTH_SOCK`,
+/// then the two 1Password paths, then the launchd socket last (it isn't a
+/// real fallback candidate at all before this last position -- see
+/// `is_macos_launchd_socket`'s doc comment on why it must be deferred).
 ///
-/// `env_sock_exists` and `first_existing_1password` are pre-resolved by the
-/// caller (real `Path::exists()` checks); this function only decides
-/// precedence. Order: a non-launchd, existing `SSH_AUTH_SOCK` wins; else the
-/// first existing 1Password candidate; else the (launchd) `SSH_AUTH_SOCK`
-/// anyway if it exists — connecting to *something* beats reporting
-/// `AgentUnavailable`, matching the Windows branch's unconditional trust of
-/// `SSH_AUTH_SOCK` just above this function's call site. Please don't
-/// "simplify" this last fallback away — it's intentional, see the tests.
-fn pick_auto_detected_socket(
-    env_sock: Option<&str>,
-    env_sock_exists: bool,
-    first_existing_1password: Option<&str>,
-) -> Option<String> {
-    let env_is_launchd = env_sock.is_some_and(is_macos_launchd_socket);
-    if env_sock_exists && !env_is_launchd {
-        return env_sock.map(str::to_owned);
-    }
-    if let Some(path) = first_existing_1password {
-        return Some(path.to_owned());
-    }
-    env_sock.filter(|_| env_sock_exists).map(str::to_owned)
-}
-
-fn resolve_agent_socket(settings: &Settings) -> Option<String> {
-    if !settings.ssh_auth_sock.trim().is_empty() {
-        return Some(settings.ssh_auth_sock.clone());
-    }
+/// On Windows this is just `SSH_AUTH_SOCK` (if set) then the well-known
+/// OpenSSH pipe -- no existence check on the env var, matching the
+/// unconditional trust this branch already gave it before probing existed;
+/// probing now does the reachability work that check used to approximate.
+fn agent_candidate_paths() -> Vec<(String, &'static str)> {
+    let mut candidates = Vec::new();
     let env_sock = env::var("SSH_AUTH_SOCK").ok();
     if cfg!(windows) {
-        // Unlike the Unix branch below, this is a deliberate unconditional
-        // trust with no existence check — an out-of-scope asymmetry left
-        // for a follow-up PR alongside probing agents for real identities.
-        return env_sock.or_else(|| Some(WINDOWS_AGENT_PIPE.into()));
+        if let Some(sock) = env_sock {
+            candidates.push((sock, "SSH_AUTH_SOCK"));
+        }
+        candidates.push((WINDOWS_AGENT_PIPE.to_owned(), "OpenSSH agent pipe"));
+        return candidates;
     }
-    let env_sock_exists = env_sock
-        .as_deref()
-        .is_some_and(|value| Path::new(value).exists());
-    let first_existing_1password = env::var_os("HOME")
-        .map(PathBuf::from)
-        .and_then(|home| {
-            [
-                home.join("Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock"),
-                home.join(".1password/agent.sock"),
-            ]
-            .into_iter()
-            .find(|path| path.exists())
+    let env_is_launchd = env_sock.as_deref().is_some_and(is_macos_launchd_socket);
+    if let Some(sock) = env_sock.clone() {
+        if !env_is_launchd {
+            candidates.push((sock, "SSH_AUTH_SOCK"));
+        }
+    }
+    if let Some(home) = env::var_os("HOME").map(PathBuf::from) {
+        candidates.push((
+            home.join("Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock")
+                .to_string_lossy()
+                .into_owned(),
+            "1Password",
+        ));
+        candidates.push((
+            home.join(".1password/agent.sock")
+                .to_string_lossy()
+                .into_owned(),
+            "1Password (legacy path)",
+        ));
+    }
+    if let Some(sock) = env_sock {
+        if env_is_launchd {
+            candidates.push((sock, "macOS login agent"));
+        }
+    }
+    candidates
+}
+
+/// Probes each candidate in order and returns the full picture -- this is
+/// what both `resolve_agent` and the `list_agent_sockets` command (the
+/// Settings dropdown) consume, so the dropdown always shows exactly what
+/// auto-detect itself just saw. Sequential, not parallel: this only runs
+/// once per resolution (agent startup, a settings save, or a sustained
+/// failure restart), not per connection attempt, so a worst case of a few
+/// candidates times `AGENT_PROBE_TIMEOUT` is a startup-latency cost, not a
+/// per-second one.
+fn probe_candidates(candidates: Vec<(String, &'static str)>) -> Vec<AgentCandidate> {
+    candidates
+        .into_iter()
+        .map(|(path, label)| {
+            let (reachable, identities) = probe_agent(&path);
+            AgentCandidate {
+                path,
+                label,
+                reachable,
+                identities,
+            }
         })
-        .map(|path| path.to_string_lossy().into_owned());
-    pick_auto_detected_socket(
-        env_sock.as_deref(),
-        env_sock_exists,
-        first_existing_1password.as_deref(),
-    )
+        .collect()
+}
+
+/// Pure decision core of auto-detect: given probe results, which candidate
+/// wins. First preference to any candidate that actually reports identities
+/// -- that's the only signal that distinguishes a real, usable agent from
+/// one that merely exists (the reported bug this whole probing mechanism
+/// exists to fix: a launchd or locked-vault agent that connects and answers
+/// with zero keys). Falling back to "first that connects" when nothing has
+/// identities keeps the locked-1Password-at-login case landing on 1Password
+/// rather than Apple's agent, since `agent_candidate_paths` already ranks
+/// 1Password ahead of the launchd socket.
+fn choose_best(candidates: &[AgentCandidate]) -> Option<&AgentCandidate> {
+    candidates
+        .iter()
+        .find(|candidate| candidate.identities.is_some_and(|count| count > 0))
+        .or_else(|| candidates.iter().find(|candidate| candidate.reachable))
+}
+
+struct AgentResolution {
+    path: String,
+    identities: Option<u32>,
+}
+
+/// The operator override in Settings is still absolute -- probing never
+/// second-guesses it -- but it's still probed (for its identity count only,
+/// never to reject it) so the "connected but zero identities" warning
+/// applies to an explicit path exactly as it does to an auto-detected one.
+fn resolve_agent(settings: &Settings) -> Option<AgentResolution> {
+    if !settings.ssh_auth_sock.trim().is_empty() {
+        let path = settings.ssh_auth_sock.clone();
+        let (_, identities) = probe_agent(&path);
+        return Some(AgentResolution { path, identities });
+    }
+    let candidates = probe_candidates(agent_candidate_paths());
+    choose_best(&candidates).map(|chosen| AgentResolution {
+        path: chosen.path.clone(),
+        identities: chosen.identities,
+    })
+}
+
+// Only `resolve_agent` itself is used in production now (`run_loop` needs
+// the identity count alongside the path); this thin wrapper survives purely
+// to keep the test assertions below readable.
+#[cfg(test)]
+fn resolve_agent_socket(settings: &Settings) -> Option<String> {
+    resolve_agent(settings).map(|resolution| resolution.path)
+}
+
+/// Probed once per resolution against every auto-detect candidate, and
+/// exposed to the frontend as-is via the `list_agent_sockets` command so the
+/// Settings dropdown shows exactly what auto-detect would choose from.
+pub fn list_agent_sockets() -> Vec<AgentCandidate> {
+    probe_candidates(agent_candidate_paths())
+}
+
+/// Connects to `path` and asks it for its identity count. This is a direct,
+/// short-lived connection straight to the candidate agent -- entirely
+/// separate from the worker's own muxed connection to the remote Mullion
+/// session, and deliberately so: `src/worker/ssh-agent-protocol-v1.json`'s
+/// `vectors` table gates *requests* flowing from a remote, muxed session
+/// through `filter.mjs`; it has no entry for the `IDENTITIES_ANSWER`
+/// response this probe reads, because that filter was never meant to see
+/// one. Routing this probe through the worker would mean teaching that
+/// filter about a response type it has no business inspecting. Don't "fix"
+/// this by moving the probe into the worker.
+fn probe_agent(path: &str) -> (bool, Option<u32>) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::net::UnixStream;
+        let Ok(mut stream) = UnixStream::connect(path) else {
+            return (false, None);
+        };
+        let _ = stream.set_read_timeout(Some(AGENT_PROBE_TIMEOUT));
+        let _ = stream.set_write_timeout(Some(AGENT_PROBE_TIMEOUT));
+        (true, exchange_identities(&mut stream).ok())
+    }
+    #[cfg(windows)]
+    {
+        // `std::fs::File` (what a named pipe opens as) has no per-call read
+        // timeout in std, unlike a Unix socket above -- so the whole
+        // connect-and-exchange runs on a helper thread and this function
+        // bounds it with a channel timeout instead. A thread that's still
+        // blocked in the pipe when the timeout fires is abandoned (its File
+        // handle closes when it eventually unblocks and the thread ends);
+        // this only happens for a genuinely wedged pipe, not the normal
+        // "answers in milliseconds or doesn't exist" case.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let owned_path = path.to_owned();
+        thread::spawn(move || {
+            let result = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&owned_path)
+                .map(|mut pipe| (true, exchange_identities(&mut pipe).ok()))
+                .unwrap_or((false, None));
+            let _ = tx.send(result);
+        });
+        rx.recv_timeout(AGENT_PROBE_TIMEOUT)
+            .unwrap_or((false, None))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        (false, None)
+    }
+}
+
+/// Sends `SSH_AGENTC_REQUEST_IDENTITIES` and returns the identity count from
+/// a well-formed `SSH_AGENT_IDENTITIES_ANSWER`. Any other response --
+/// including `SSH_AGENT_FAILURE`, a frame over the size cap, or the
+/// connection closing mid-read -- is `Err`, which callers treat as "reachable,
+/// identity count unknown" rather than propagating a specific reason; the
+/// only thing this probe reports onward is a count.
+fn exchange_identities(transport: &mut (impl Read + Write)) -> io::Result<u32> {
+    transport.write_all(&REQUEST_IDENTITIES_FRAME)?;
+    let mut len_buf = [0u8; 4];
+    transport.read_exact(&mut len_buf)?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    if len == 0 || len > MAX_AGENT_PROBE_FRAME_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "agent response frame outside the expected size",
+        ));
+    }
+    let mut payload = vec![0u8; len];
+    transport.read_exact(&mut payload)?;
+    if payload.first().copied() != Some(SSH_AGENT_IDENTITIES_ANSWER) || payload.len() < 5 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "not a well-formed identities answer",
+        ));
+    }
+    Ok(u32::from_be_bytes(payload[1..5].try_into().unwrap()))
 }
 
 fn worker_path() -> Result<PathBuf, String> {
@@ -1077,16 +1290,34 @@ mod tests {
         path
     }
 
+    /// A `HOME` short enough that `<home>/Library/Group Containers/
+    /// 2BUA8C4S2C.com.1password/t/agent.sock` still fits inside
+    /// `sockaddr_un::sun_path` (108 bytes on Linux, 104 on BSD/macOS) when a
+    /// test needs to really `bind()`/`connect()` a Unix socket there.
+    /// `test_data_dir`'s descriptive names are far too long for that -- this
+    /// is deliberately terse instead, hard-coded to `/tmp` rather than
+    /// `env::temp_dir()` since `$TMPDIR` on macOS is itself often 40+ bytes,
+    /// which alone can blow the budget.
+    #[cfg(unix)]
+    fn short_socket_home(tag: &str) -> PathBuf {
+        let path = PathBuf::from("/tmp").join(format!("mh{tag}{}", std::process::id()));
+        let _ = fs::remove_dir_all(&path);
+        path
+    }
+
     #[test]
     fn explicit_socket_wins() {
+        // Deliberately points at nothing -- the whole point of this test is
+        // that an explicit override is trusted absolutely, even when the
+        // probe behind it can't reach anything.
         let settings = Settings {
-            ssh_auth_sock: "/tmp/custom-agent.sock".into(),
+            ssh_auth_sock: "/tmp/custom-agent.sock-does-not-exist".into(),
             insecure: false,
             launch_at_login: false,
         };
         assert_eq!(
             resolve_agent_socket(&settings).as_deref(),
-            Some("/tmp/custom-agent.sock")
+            Some("/tmp/custom-agent.sock-does-not-exist")
         );
     }
 
@@ -1126,72 +1357,72 @@ mod tests {
         ));
     }
 
-    // The real regression tests for the reported bug: `pick_auto_detected_
-    // socket` is pure, so these use plain literals rather than faking a
-    // real launchd socket file — which isn't even possible to do portably
-    // in a test that might run on Linux CI. This is the exact value
-    // confirmed via `launchctl getenv SSH_AUTH_SOCK` on the reporting
-    // machine, not a guessed shape.
     const LAUNCHD_SOCK: &str = "/var/run/com.apple.launchd.oLcNuPYLZu/Listeners";
-    const ONEPASSWORD_SOCK: &str =
-        "/Users/me/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock";
 
+    fn candidate(
+        path: &str,
+        label: &'static str,
+        reachable: bool,
+        identities: Option<u32>,
+    ) -> AgentCandidate {
+        AgentCandidate {
+            path: path.to_owned(),
+            label,
+            reachable,
+            identities,
+        }
+    }
+
+    // Pure regression tests for the reported bug, now expressed on
+    // `choose_best` over literal `AgentCandidate` values instead of raw
+    // existence flags -- selection is driven by probed identity counts, not
+    // by what merely exists on disk.
     #[test]
-    fn reported_bug_launchd_socket_present_defers_to_1password() {
+    fn choose_best_prefers_any_candidate_with_identities_over_a_merely_reachable_one() {
+        let candidates = vec![
+            candidate(LAUNCHD_SOCK, "macOS login agent", true, Some(0)),
+            candidate("/1p", "1Password", true, Some(3)),
+        ];
         assert_eq!(
-            pick_auto_detected_socket(Some(LAUNCHD_SOCK), true, Some(ONEPASSWORD_SOCK)),
-            Some(ONEPASSWORD_SOCK.to_owned())
+            choose_best(&candidates).map(|c| c.path.as_str()),
+            Some("/1p")
         );
     }
 
     #[test]
-    fn a_real_non_launchd_sock_still_wins_over_1password() {
+    fn choose_best_falls_back_to_first_reachable_when_nothing_has_identities() {
+        // The reported configuration: a locked (connectable, zero-identity)
+        // 1Password ranked ahead of the (also zero-identity) launchd agent
+        // must still win, purely by list order, once neither has identities.
+        let candidates = vec![
+            candidate("/1p", "1Password", true, Some(0)),
+            candidate(LAUNCHD_SOCK, "macOS login agent", true, Some(0)),
+        ];
         assert_eq!(
-            pick_auto_detected_socket(
-                Some("/tmp/ssh-AbCdEf/agent.12345"),
-                true,
-                Some(ONEPASSWORD_SOCK)
-            ),
-            Some("/tmp/ssh-AbCdEf/agent.12345".to_owned())
+            choose_best(&candidates).map(|c| c.path.as_str()),
+            Some("/1p")
         );
     }
 
     #[test]
-    fn launchd_socket_is_the_last_resort_fallback() {
-        // No 1Password candidate found (e.g. HOME unset, or 1Password not
-        // installed): fall back to the launchd socket rather than
-        // AgentUnavailable — connecting to something beats nothing.
+    fn choose_best_skips_unreachable_candidates_entirely() {
+        let candidates = vec![
+            candidate("/dead", "SSH_AUTH_SOCK", false, None),
+            candidate("/1p", "1Password", true, Some(0)),
+        ];
         assert_eq!(
-            pick_auto_detected_socket(Some(LAUNCHD_SOCK), true, None),
-            Some(LAUNCHD_SOCK.to_owned())
+            choose_best(&candidates).map(|c| c.path.as_str()),
+            Some("/1p")
         );
     }
 
     #[test]
-    fn a_stale_env_sock_that_does_not_exist_is_ignored() {
-        // SSH_AUTH_SOCK set but dangling (e.g. dead forwarded socket): fall
-        // straight through to 1Password rather than the last-resort branch,
-        // matching pre-existing behavior for a non-launchd dangling socket.
-        assert_eq!(
-            pick_auto_detected_socket(Some("/tmp/dead.sock"), false, Some(ONEPASSWORD_SOCK)),
-            Some(ONEPASSWORD_SOCK.to_owned())
-        );
-        assert_eq!(
-            pick_auto_detected_socket(Some("/tmp/dead.sock"), false, None),
-            None
-        );
+    fn choose_best_returns_none_when_nothing_is_reachable() {
+        let candidates = vec![candidate("/dead", "SSH_AUTH_SOCK", false, None)];
+        assert!(choose_best(&candidates).is_none());
     }
 
-    #[test]
-    fn no_env_sock_falls_through_to_1password_or_none() {
-        assert_eq!(
-            pick_auto_detected_socket(None, false, Some(ONEPASSWORD_SOCK)),
-            Some(ONEPASSWORD_SOCK.to_owned())
-        );
-        assert_eq!(pick_auto_detected_socket(None, false, None), None);
-    }
-
-    // `resolve_agent_socket` auto-detect reads process-global env vars
+    // `agent_candidate_paths`/`resolve_agent` read process-global env vars
     // (`SSH_AUTH_SOCK`, `HOME`), and `cargo test` runs tests in parallel by
     // default — every test below that touches either takes this lock so
     // runs can't interleave and observe a value neither of them set. Any
@@ -1226,30 +1457,164 @@ mod tests {
         }
     }
 
-    fn write_fake_1password_socket(home: &Path) -> PathBuf {
-        let socket = home.join("Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock");
-        fs::create_dir_all(socket.parent().unwrap()).unwrap();
-        fs::write(&socket, b"").unwrap();
-        socket
-    }
-
-    // These two exercise `resolve_agent_socket`'s *wiring* — reading
-    // `SSH_AUTH_SOCK`/`HOME` and building the real 1Password candidate
-    // paths — on top of the ranking already proven purely above. (A
-    // wiring test can't itself fake a launchd socket that `exists()`
-    // without writing to the real `/private/tmp`, which isn't possible
-    // portably in a unit test — that's exactly why the ranking has its own
-    // pure tests instead.) Both take `AGENT_ENV_LOCK` since they mutate
-    // process-global env vars and `cargo test` runs in parallel by default.
     #[test]
     #[cfg(not(windows))]
-    fn resolve_agent_socket_finds_1password_via_home_when_env_sock_is_unset() {
+    fn candidate_list_ranks_1password_ahead_of_the_launchd_socket() {
         let _lock = AGENT_ENV_LOCK.lock().unwrap();
-        let home = test_data_dir("agent-home-wiring");
+        let _sock_guard = EnvVarGuard::set("SSH_AUTH_SOCK", LAUNCHD_SOCK);
+        // agent_candidate_paths doesn't check existence, so any HOME value
+        // is enough to make the two 1Password paths appear in the list.
+        let _home_guard = EnvVarGuard::set("HOME", "/nonexistent-home-for-tests");
+
+        let labels: Vec<&str> = agent_candidate_paths()
+            .iter()
+            .map(|(_, label)| *label)
+            .collect();
+        assert_eq!(
+            labels,
+            vec!["1Password", "1Password (legacy path)", "macOS login agent"]
+        );
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn candidate_list_omits_the_launchd_socket_when_home_is_unset() {
+        let _lock = AGENT_ENV_LOCK.lock().unwrap();
+        let _sock_guard = EnvVarGuard::set("SSH_AUTH_SOCK", LAUNCHD_SOCK);
+        let _home_guard = EnvVarGuard::unset("HOME");
+
+        let candidates = agent_candidate_paths();
+        let paths: Vec<&str> = candidates.iter().map(|(path, _)| path.as_str()).collect();
+        assert_eq!(paths, vec![LAUNCHD_SOCK]);
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn candidate_list_puts_a_real_non_launchd_sock_first() {
+        let _lock = AGENT_ENV_LOCK.lock().unwrap();
+        let _sock_guard = EnvVarGuard::set("SSH_AUTH_SOCK", "/tmp/ssh-AbCdEf/agent.12345");
+        let _home_guard = EnvVarGuard::set("HOME", "/nonexistent-home-for-tests");
+
+        let candidates = agent_candidate_paths();
+        assert_eq!(
+            candidates.first().map(|(path, _)| path.as_str()),
+            Some("/tmp/ssh-AbCdEf/agent.12345")
+        );
+        assert_eq!(
+            candidates.last().map(|(_, label)| *label),
+            Some("1Password (legacy path)")
+        );
+    }
+
+    /// Binds a real `UnixListener` at `path` (synchronously, so it's ready
+    /// to accept the moment this returns) and answers the first connection
+    /// with either a well-formed `IDENTITIES_ANSWER` carrying
+    /// `respond_with_identities` identities, or -- if `None` -- accepts the
+    /// connection and then closes it without replying, exercising the
+    /// "reachable but the exchange itself doesn't pan out" path.
+    #[cfg(unix)]
+    fn spawn_fake_agent(path: &Path, respond_with_identities: Option<u32>) {
+        let listener = std::os::unix::net::UnixListener::bind(path).unwrap();
+        thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                if let Some(count) = respond_with_identities {
+                    let mut request = [0u8; 5];
+                    if stream.read_exact(&mut request).is_ok() {
+                        let mut payload = vec![SSH_AGENT_IDENTITIES_ANSWER];
+                        payload.extend_from_slice(&count.to_be_bytes());
+                        let mut frame = (payload.len() as u32).to_be_bytes().to_vec();
+                        frame.extend_from_slice(&payload);
+                        let _ = stream.write_all(&frame);
+                    }
+                }
+            }
+        });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn exchange_identities_reads_a_well_formed_answer() {
+        let (mut client, server) = std::os::unix::net::UnixStream::pair().unwrap();
+        thread::spawn(move || {
+            let mut server = server;
+            let mut request = [0u8; 5];
+            server.read_exact(&mut request).unwrap();
+            assert_eq!(request, REQUEST_IDENTITIES_FRAME);
+            let mut payload = vec![SSH_AGENT_IDENTITIES_ANSWER];
+            payload.extend_from_slice(&7u32.to_be_bytes());
+            let mut frame = (payload.len() as u32).to_be_bytes().to_vec();
+            frame.extend_from_slice(&payload);
+            server.write_all(&frame).unwrap();
+        });
+        assert_eq!(exchange_identities(&mut client).unwrap(), 7);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn exchange_identities_rejects_a_non_identities_answer() {
+        let (mut client, server) = std::os::unix::net::UnixStream::pair().unwrap();
+        thread::spawn(move || {
+            let mut server = server;
+            let mut request = [0u8; 5];
+            server.read_exact(&mut request).unwrap();
+            // SSH_AGENT_FAILURE (type 5), no count -- what a real agent
+            // sends for a rejected/unsupported request.
+            let _ = server.write_all(&[0, 0, 0, 1, 5]);
+        });
+        assert!(exchange_identities(&mut client).is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn exchange_identities_errors_when_the_connection_closes_without_replying() {
+        let (mut client, server) = std::os::unix::net::UnixStream::pair().unwrap();
+        drop(server);
+        assert!(exchange_identities(&mut client).is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn probe_agent_reports_unreachable_for_a_path_nothing_is_listening_on() {
+        let path = test_data_dir("agent-probe-unreachable").with_extension("sock");
+        assert_eq!(probe_agent(path.to_str().unwrap()), (false, None));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn probe_agent_reports_identities_from_a_real_listener() {
+        let path = test_data_dir("agent-probe-identities").with_extension("sock");
+        spawn_fake_agent(&path, Some(3));
+        assert_eq!(probe_agent(path.to_str().unwrap()), (true, Some(3)));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn probe_agent_reports_reachable_with_unknown_identities_when_the_agent_never_replies() {
+        let path = test_data_dir("agent-probe-silent").with_extension("sock");
+        spawn_fake_agent(&path, None);
+        assert_eq!(probe_agent(path.to_str().unwrap()), (true, None));
+        let _ = fs::remove_file(&path);
+    }
+
+    // End-to-end `resolve_agent`/`resolve_agent_socket` tests: real
+    // `UnixListener`s standing in for 1Password and the launchd agent, so
+    // these exercise probing and `choose_best` together exactly as
+    // `run_loop` does, not just the pure ranking proven above.
+    #[test]
+    #[cfg(not(windows))]
+    fn resolve_agent_socket_picks_the_only_candidate_reporting_identities() {
+        let _lock = AGENT_ENV_LOCK.lock().unwrap();
+        let home = short_socket_home("a");
         fs::create_dir_all(&home).unwrap();
-        let onepassword_sock = write_fake_1password_socket(&home);
+        let onepassword_sock =
+            home.join("Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock");
+        fs::create_dir_all(onepassword_sock.parent().unwrap()).unwrap();
+        spawn_fake_agent(&onepassword_sock, Some(2));
+        let real_sock = home.join("real-agent.sock");
+        spawn_fake_agent(&real_sock, Some(0));
         let _home_guard = EnvVarGuard::set("HOME", home.to_str().unwrap());
-        let _sock_guard = EnvVarGuard::unset("SSH_AUTH_SOCK");
+        let _sock_guard = EnvVarGuard::set("SSH_AUTH_SOCK", real_sock.to_str().unwrap());
 
         let settings = Settings::default();
         assert_eq!(
@@ -1262,26 +1627,39 @@ mod tests {
 
     #[test]
     #[cfg(not(windows))]
-    fn a_real_ssh_auth_sock_still_wins_over_1password() {
+    fn resolve_agent_socket_reported_configuration_picks_1password_over_a_locked_vault_and_launchd()
+    {
         let _lock = AGENT_ENV_LOCK.lock().unwrap();
-        let home = test_data_dir("agent-home-real-sock");
+        let home = short_socket_home("b");
         fs::create_dir_all(&home).unwrap();
-        write_fake_1password_socket(&home);
+        let onepassword_sock =
+            home.join("Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock");
+        fs::create_dir_all(onepassword_sock.parent().unwrap()).unwrap();
+        // A locked vault: connects, reports zero identities -- must still
+        // beat the launchd agent purely by candidate-list order.
+        spawn_fake_agent(&onepassword_sock, Some(0));
         let _home_guard = EnvVarGuard::set("HOME", home.to_str().unwrap());
-        // A real, existing, non-launchd-shaped SSH_AUTH_SOCK (e.g. a
-        // forwarded agent socket) must not be second-guessed just because
-        // 1Password also happens to be present.
-        let real_sock = home.join("real-agent.sock");
-        fs::write(&real_sock, b"").unwrap();
-        let _sock_guard = EnvVarGuard::set("SSH_AUTH_SOCK", real_sock.to_str().unwrap());
+        let _sock_guard = EnvVarGuard::set("SSH_AUTH_SOCK", LAUNCHD_SOCK);
 
         let settings = Settings::default();
         assert_eq!(
             resolve_agent_socket(&settings).as_deref(),
-            real_sock.to_str()
+            onepassword_sock.to_str()
         );
 
         let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn resolve_agent_socket_returns_none_when_no_candidate_is_reachable() {
+        let _lock = AGENT_ENV_LOCK.lock().unwrap();
+        let home = short_socket_home("c");
+        let _home_guard = EnvVarGuard::set("HOME", home.to_str().unwrap());
+        let _sock_guard = EnvVarGuard::set("SSH_AUTH_SOCK", "/tmp/dead-agent-sock-for-tests");
+
+        let settings = Settings::default();
+        assert_eq!(resolve_agent_socket(&settings), None);
     }
 
     #[test]
