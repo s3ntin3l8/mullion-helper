@@ -43,6 +43,33 @@ const MAX_CONCURRENT_WINDOWS_AGENT_PROBES: usize = 8;
 #[cfg(windows)]
 static PENDING_WINDOWS_AGENT_PROBES: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
+// How long a path that just timed out is skipped before being probed again.
+// Long enough that a genuinely wedged pipe isn't re-spawned on every
+// resolution (every worker restart); short enough that a since-fixed pipe
+// (service restarted, pipe re-created) recovers well within a support
+// conversation rather than needing an app restart.
+#[cfg(windows)]
+const WINDOWS_PROBE_COOLDOWN: Duration = Duration::from_secs(5 * 60);
+#[cfg(windows)]
+static WINDOWS_PROBE_COOLDOWNS: std::sync::LazyLock<
+    Mutex<std::collections::HashMap<String, Instant>>,
+> = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+/// Releases a `PENDING_WINDOWS_AGENT_PROBES` slot exactly once no matter
+/// which side -- the caller giving up in `probe_agent`, or the probe thread
+/// itself finishing late -- gets there first. `AtomicBool::compare_exchange`
+/// makes the race safe: only the side that flips `false` -> `true` actually
+/// decrements, so a slot already reclaimed by a caller timeout is never
+/// double-released when the thread eventually completes too.
+#[cfg(windows)]
+fn release_windows_probe_slot(released: &AtomicBool) {
+    if released
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        PENDING_WINDOWS_AGENT_PROBES.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -936,29 +963,43 @@ fn probe_agent(path: &str) -> (bool, Option<u32>) {
         // bounds ITS OWN wait with a channel timeout. That does not cancel
         // the thread itself: a pipe that accepts the connection and then
         // never answers leaves that thread permanently blocked in
-        // `read_exact`, and `resolve_agent` re-probes on every restart, so
-        // repeated hangs against the same wedged pipe would otherwise leak
-        // one thread per attempt without bound. A real fix needs overlapped
-        // I/O (`ReadFile` + `OVERLAPPED` + `CancelIoEx`) to actually cancel
-        // a stuck read, which isn't available in std and isn't something
-        // this change can add and then verify without a Windows machine --
-        // so instead this caps how many such threads can be outstanding at
-        // once: past the cap, a probe reports unreachable immediately
-        // rather than spawning another thread that might never return. That
-        // bounds the leak to `MAX_CONCURRENT_WINDOWS_AGENT_PROBES` stuck
-        // threads instead of leaving it unbounded, at the cost of briefly
-        // under-reporting reachability if that many probes are already
-        // wedged at once -- a real gap, but a bounded one instead of an
-        // open-ended resource leak. Tracked for a proper overlapped-I/O fix
-        // once this can be verified on Windows.
+        // `read_exact`. A real fix needs overlapped I/O (`ReadFile` +
+        // `OVERLAPPED` + `CancelIoEx`) to actually cancel a stuck read,
+        // which isn't available in std and isn't something this change can
+        // add and then verify without a Windows machine -- so instead this
+        // bounds the damage two ways: `PENDING_WINDOWS_AGENT_PROBES` caps
+        // concurrent in-flight spawns (reclaimed the moment the caller
+        // stops waiting, not just when the thread eventually finishes --
+        // see `release_windows_probe_slot`), and `WINDOWS_PROBE_COOLDOWNS`
+        // stops a specific wedged path from being re-spawned on every retry
+        // (`resolve_agent` re-probes on every restart). Without the
+        // cooldown, the concurrency cap alone would eventually saturate
+        // from nothing but one already-known-bad path being retried over
+        // and over, permanently shorting out probing for every OTHER
+        // candidate too -- worse than the leak it was meant to bound.
+        let now = Instant::now();
+        {
+            let mut cooldowns = WINDOWS_PROBE_COOLDOWNS
+                .lock()
+                .expect("windows probe cooldown mutex poisoned");
+            if let Some(&until) = cooldowns.get(path) {
+                if now < until {
+                    return (false, None);
+                }
+                cooldowns.remove(path);
+            }
+        }
         if PENDING_WINDOWS_AGENT_PROBES.load(Ordering::SeqCst)
             >= MAX_CONCURRENT_WINDOWS_AGENT_PROBES
         {
             return (false, None);
         }
         PENDING_WINDOWS_AGENT_PROBES.fetch_add(1, Ordering::SeqCst);
+        let released = Arc::new(AtomicBool::new(false));
         let (tx, rx) = std::sync::mpsc::channel();
         let owned_path = path.to_owned();
+        let thread_released = Arc::clone(&released);
+        let thread_path = owned_path.clone();
         thread::spawn(move || {
             let result = std::fs::OpenOptions::new()
                 .read(true)
@@ -967,10 +1008,33 @@ fn probe_agent(path: &str) -> (bool, Option<u32>) {
                 .map(|mut pipe| (true, exchange_identities(&mut pipe).ok()))
                 .unwrap_or((false, None));
             let _ = tx.send(result);
-            PENDING_WINDOWS_AGENT_PROBES.fetch_sub(1, Ordering::SeqCst);
+            release_windows_probe_slot(&thread_released);
+            // Whatever the outcome, the pipe just answered -- it isn't
+            // wedged, so don't make a future probe wait out a cooldown that
+            // no longer applies (this may run long after the caller below
+            // already gave up and recorded one).
+            WINDOWS_PROBE_COOLDOWNS
+                .lock()
+                .expect("windows probe cooldown mutex poisoned")
+                .remove(&thread_path);
         });
-        rx.recv_timeout(AGENT_PROBE_TIMEOUT)
-            .unwrap_or((false, None))
+        match rx.recv_timeout(AGENT_PROBE_TIMEOUT) {
+            Ok(result) => result,
+            Err(_) => {
+                // The thread may still be blocked -- reclaim the
+                // concurrency slot (it only ever bounded in-flight spawns,
+                // not thread lifetime) and remember not to re-spawn against
+                // this exact path again until the cooldown lapses, so a
+                // genuinely wedged pipe costs one leaked thread per
+                // cooldown window rather than one per retry.
+                release_windows_probe_slot(&released);
+                WINDOWS_PROBE_COOLDOWNS
+                    .lock()
+                    .expect("windows probe cooldown mutex poisoned")
+                    .insert(path.to_owned(), now + WINDOWS_PROBE_COOLDOWN);
+                (false, None)
+            }
+        }
     }
     #[cfg(not(any(unix, windows)))]
     {
