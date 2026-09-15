@@ -6,10 +6,10 @@ import type { AgentCandidate, BridgeStatus, Notice, Settings } from "./types";
 
 const CUSTOM_PATH = "__custom__";
 
-// Mirrors the Rust side's `choose_best` (supervisor.rs) for display only —
+// Mirrors `choose_best` in src-tauri/src/supervisor.rs for display only —
 // this never decides which socket is actually used, it only labels what
 // auto-detect would pick so "Auto-detect" isn't shown as an unexplained
-// no-op in the dropdown.
+// no-op in the dropdown. If that ranking ever changes, update this too.
 function describeAutoDetect(candidates: AgentCandidate[]): string {
   const winner = candidates.find((candidate) => (candidate.identities ?? 0) > 0)
     ?? candidates.find((candidate) => candidate.reachable);
@@ -201,7 +201,7 @@ export function App() {
       <div className="status-copy"><strong>{status ? labels[status.state] : "Loading…"}</strong><span>{status?.detail ?? (connected ? "Your SSH agent is available to Mullion sessions." : "The tray icon keeps the bridge available in the background.")}</span>{status?.base_url && <small>{status.base_url}</small>}</div>
       {!needsPairing && (running ? <button className="secondary" disabled={busy} onClick={() => void act(api.pause)}>Pause</button> : <button disabled={busy} onClick={() => void act(api.start)}>Start</button>)}
     </section>
-    {status?.agent_identities === 0 && <p className="agent-warning">Your SSH agent is connected but has no identities loaded — unlock it, or check Settings → SSH agent socket.</p>}
+    {connected && status?.agent_identities === 0 && <p className="agent-warning">Your SSH agent is connected but has no identities loaded — unlock it, or check Settings → SSH agent socket.</p>}
     {needsPairing && <section className="panel onboarding"><span className="eyebrow">First-time setup</span><h2>Connect this computer</h2><p>In Mullion, open Settings → Hosts → SSH agent bridges, create a pairing code, then paste the payload below.</p>{pairingForm}</section>}
     {settings && <section className="panel"><span className="eyebrow">Configuration</span><h2>Settings</h2>
       <label>SSH agent socket

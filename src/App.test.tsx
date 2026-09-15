@@ -175,4 +175,21 @@ describe("Mullion Helper window", () => {
 
     await waitFor(() => expect(mockApi.listAgentSockets.mock.calls.length).toBeGreaterThan(callsBeforeClick));
   });
+
+  it("warns when the agent is connected but reports zero identities", async () => {
+    mockApi.status.mockResolvedValueOnce({ ...connectedStatus, agent_identities: 0 });
+    render(<App />);
+    await screen.findByText("Bridge connected");
+    expect(await screen.findByText(/no identities loaded/)).toBeVisible();
+  });
+
+  it("does not show the zero-identity warning outside a connected state, even if a stale count says zero", async () => {
+    // Regression for the Hermes-flagged stale-stamp bug: a prior
+    // resolution's identity count could otherwise leak onto an unrelated
+    // state (e.g. AgentUnavailable) and render a contradictory warning.
+    mockApi.status.mockResolvedValueOnce({ ...unpairedStatus, state: "agent_unavailable", agent_identities: 0 });
+    render(<App />);
+    await screen.findByText("SSH agent unavailable");
+    expect(screen.queryByText(/no identities loaded/)).not.toBeInTheDocument();
+  });
 });

@@ -34,6 +34,15 @@ const MAX_AGENT_PROBE_FRAME_BYTES: usize = 262_144;
 // waking up) as unreachable, not long enough to matter to a human waiting
 // for the app to start.
 const AGENT_PROBE_TIMEOUT: Duration = Duration::from_millis(750);
+// Bounds the leak from a wedged Windows named pipe -- see the doc comment
+// on `probe_agent`'s Windows branch. There are at most a handful of
+// candidates per resolution (`agent_candidate_paths`), so this is generous
+// for legitimate concurrent probing while still capping the worst case.
+#[cfg(windows)]
+const MAX_CONCURRENT_WINDOWS_AGENT_PROBES: usize = 8;
+#[cfg(windows)]
+static PENDING_WINDOWS_AGENT_PROBES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -382,6 +391,16 @@ impl<R: Runtime> Supervisor<R> {
             let resolution = match resolve_agent(&self.settings()) {
                 Some(value) => value,
                 None => {
+                    // No candidate was even reachable -- a prior successful
+                    // resolution's identity count must not leak onto this
+                    // status (see the `pause`/`unpair` precedent above and
+                    // `agent_identities`'s doc comment: `None` means "no
+                    // agent resolved", which is exactly this branch).
+                    *self
+                        .0
+                        .agent_identities
+                        .lock()
+                        .expect("agent identities mutex poisoned") = None;
                     self.set_status(BridgeStatus::new(BridgeState::AgentUnavailable, Some("No SSH agent socket was found. Open your SSH agent or configure its socket in Settings.".into())));
                     self.interruptible_sleep(Duration::from_secs(3));
                     continue;
@@ -914,11 +933,30 @@ fn probe_agent(path: &str) -> (bool, Option<u32>) {
         // `std::fs::File` (what a named pipe opens as) has no per-call read
         // timeout in std, unlike a Unix socket above -- so the whole
         // connect-and-exchange runs on a helper thread and this function
-        // bounds it with a channel timeout instead. A thread that's still
-        // blocked in the pipe when the timeout fires is abandoned (its File
-        // handle closes when it eventually unblocks and the thread ends);
-        // this only happens for a genuinely wedged pipe, not the normal
-        // "answers in milliseconds or doesn't exist" case.
+        // bounds ITS OWN wait with a channel timeout. That does not cancel
+        // the thread itself: a pipe that accepts the connection and then
+        // never answers leaves that thread permanently blocked in
+        // `read_exact`, and `resolve_agent` re-probes on every restart, so
+        // repeated hangs against the same wedged pipe would otherwise leak
+        // one thread per attempt without bound. A real fix needs overlapped
+        // I/O (`ReadFile` + `OVERLAPPED` + `CancelIoEx`) to actually cancel
+        // a stuck read, which isn't available in std and isn't something
+        // this change can add and then verify without a Windows machine --
+        // so instead this caps how many such threads can be outstanding at
+        // once: past the cap, a probe reports unreachable immediately
+        // rather than spawning another thread that might never return. That
+        // bounds the leak to `MAX_CONCURRENT_WINDOWS_AGENT_PROBES` stuck
+        // threads instead of leaving it unbounded, at the cost of briefly
+        // under-reporting reachability if that many probes are already
+        // wedged at once -- a real gap, but a bounded one instead of an
+        // open-ended resource leak. Tracked for a proper overlapped-I/O fix
+        // once this can be verified on Windows.
+        if PENDING_WINDOWS_AGENT_PROBES.load(Ordering::SeqCst)
+            >= MAX_CONCURRENT_WINDOWS_AGENT_PROBES
+        {
+            return (false, None);
+        }
+        PENDING_WINDOWS_AGENT_PROBES.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = std::sync::mpsc::channel();
         let owned_path = path.to_owned();
         thread::spawn(move || {
@@ -929,6 +967,7 @@ fn probe_agent(path: &str) -> (bool, Option<u32>) {
                 .map(|mut pipe| (true, exchange_identities(&mut pipe).ok()))
                 .unwrap_or((false, None));
             let _ = tx.send(result);
+            PENDING_WINDOWS_AGENT_PROBES.fetch_sub(1, Ordering::SeqCst);
         });
         rx.recv_timeout(AGENT_PROBE_TIMEOUT)
             .unwrap_or((false, None))
