@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.11](https://github.com/s3ntin3l8/mullion-helper/compare/v0.1.10...v0.1.11) (2026-09-15)
+
+
+### Bug Fixes
+
+* **deps:** bump rustls to 0.23.45 for RUSTSEC-2026-0285 ([#51](https://github.com/s3ntin3l8/mullion-helper/issues/51)) ([69d0266](https://github.com/s3ntin3l8/mullion-helper/commit/69d02662f04b28d4d0500bf80996ab8857d30111))
+* show the app version, report the real log path, and fix the unpair button's styling ([#50](https://github.com/s3ntin3l8/mullion-helper/issues/50)) ([ed31ddb](https://github.com/s3ntin3l8/mullion-helper/commit/ed31ddb036016c65e97806549b3314a1d3133e06))
+
 ## [0.1.10](https://github.com/s3ntin3l8/mullion-helper/compare/v0.1.9...v0.1.10) (2026-09-14)
 
 
