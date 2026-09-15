@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         Arc, Mutex,
     },
     thread::{self, JoinHandle},
@@ -18,6 +18,20 @@ use tauri::{AppHandle, Emitter, Manager, Runtime, Wry};
 
 const WINDOWS_AGENT_PIPE: &str = r"\\.\pipe\openssh-ssh-agent";
 const HEALTHY_CONNECTION_RESET_AFTER: Duration = Duration::from_secs(30);
+// How long the bridge can stay unhealthy (repeated connect_failed/
+// disconnected events, no intervening "connected") before the supervisor
+// tears the worker down and lets its own restart ladder respawn it fresh.
+// The worker's own internal reconnect ladder already retries forever on its
+// own (RECONNECT_DELAYS_MS in helper.mjs, topping out at 30s), which is
+// enough for an ordinary blip -- this exists for the failure mode a plain
+// retry ladder can't fix on its own: a live process stuck talking to a
+// server or network path that's transiently broken in a way a fresh
+// process (fresh DNS resolution, fresh TLS session, fresh TCP connection
+// pool) recovers from but the SAME process retrying the SAME broken state
+// never does. Long enough that a genuine transient (server restart, brief
+// route flap) resolves well before this fires; short enough that a repeat
+// of the reported 4-hour outage self-heals in minutes instead.
+const SUSTAINED_FAILURE_RESTART_AFTER: Duration = Duration::from_secs(180);
 
 // Wire format for the probe this module speaks directly to a candidate SSH
 // agent -- entirely separate from the worker's own mux (see the doc comment
@@ -99,6 +113,15 @@ pub struct BridgeStatus {
     // "connected but useless" case this exists to surface; `None` means no
     // agent has been resolved yet (paused/unpaired) or the count is unknown.
     pub agent_identities: Option<u32>,
+    // How many "connect_failed" events (never even reaching a connection,
+    // as opposed to "disconnected" -- see handle_event) have fired since
+    // the last successful "connected". Stamped by `set_status` from
+    // `Inner::consecutive_connect_failures` the same way `agent_identities`
+    // is, so it's visible on every status regardless of which event
+    // constructed it. The frontend uses this to escalate its presentation
+    // of a stuck Reconnecting state; it never drives a state change here
+    // (see PR discussion on not adding a new BridgeState for this).
+    pub consecutive_connect_failures: u32,
 }
 
 impl BridgeStatus {
@@ -111,6 +134,7 @@ impl BridgeStatus {
             retry_in_ms: None,
             updated_at: Utc::now().to_rfc3339(),
             agent_identities: None,
+            consecutive_connect_failures: 0,
         }
     }
 }
@@ -153,6 +177,15 @@ struct Inner<R: Runtime> {
     settings: Mutex<Settings>,
     connected_at: Mutex<Option<Instant>>,
     agent_identities: Mutex<Option<u32>>,
+    consecutive_connect_failures: AtomicU32,
+    // Wall-clock start of the current unhealthy streak (first
+    // connect_failed/disconnected since the last connected), or None while
+    // healthy/idle. Drives the sustained-failure restart in handle_event --
+    // deliberately separate from `consecutive_connect_failures`, which is
+    // attempt-counted and purely for display (see SUSTAINED_FAILURE_
+    // RESTART_AFTER's doc comment on why the restart trigger must be
+    // time-based instead).
+    unhealthy_since: Mutex<Option<Instant>>,
 }
 
 pub struct Supervisor<R: Runtime = Wry>(Arc<Inner<R>>);
@@ -180,6 +213,8 @@ impl<R: Runtime> Supervisor<R> {
             settings: Mutex::new(settings),
             connected_at: Mutex::new(None),
             agent_identities: Mutex::new(None),
+            consecutive_connect_failures: AtomicU32::new(0),
+            unhealthy_since: Mutex::new(None),
         })))
     }
 
@@ -218,6 +253,7 @@ impl<R: Runtime> Supervisor<R> {
             .map_err(|_| "settings mutex poisoned")? = settings.clone();
         if self.0.desired.load(Ordering::SeqCst) {
             self.stop_child();
+            self.reset_failure_tracking();
         }
         Ok(settings)
     }
@@ -239,6 +275,7 @@ impl<R: Runtime> Supervisor<R> {
             .agent_identities
             .lock()
             .expect("agent identities mutex poisoned") = None;
+        self.reset_failure_tracking();
         self.set_status(BridgeStatus::new(BridgeState::Paused, None));
         self.status()
     }
@@ -333,6 +370,7 @@ impl<R: Runtime> Supervisor<R> {
             .agent_identities
             .lock()
             .expect("agent identities mutex poisoned") = None;
+        self.reset_failure_tracking();
         let credential_path = self.0.data_dir.join("worker/ssh-agent-bridge.json");
         if let Err(error) = fs::remove_file(&credential_path) {
             // Already unpaired (or never paired): treat as success rather
@@ -573,6 +611,7 @@ impl<R: Runtime> Supervisor<R> {
                     .connected_at
                     .lock()
                     .expect("connection mutex poisoned") = Some(Instant::now());
+                self.reset_failure_tracking();
                 let mut status = BridgeStatus::new(BridgeState::Connected, None);
                 status.base_url = event
                     .get("base_url")
@@ -616,11 +655,79 @@ impl<R: Runtime> Supervisor<R> {
                 if let Some(message) = message {
                     log::warn!("worker reported {event_type}: {message}");
                 }
+                // Attempt-counted and display-only -- only a connect_failed
+                // (never even reached a connection) counts, matching the
+                // reported bug's own signature (hundreds of back-to-back
+                // "connection error"s). A "disconnected" means a connection
+                // DID succeed at some point in this streak, which is a
+                // materially better signal than never connecting at all,
+                // even though both still leave the bridge un-connected now.
+                if event_type == "connect_failed" {
+                    self.0
+                        .consecutive_connect_failures
+                        .fetch_add(1, Ordering::SeqCst);
+                }
+                // Time-based, not attempt-based -- see SUSTAINED_FAILURE_
+                // RESTART_AFTER's doc comment for why. Both event types
+                // count toward the streak: either one means "not currently
+                // connected," which is the actual condition the restart
+                // exists to break out of.
+                let now = Instant::now();
+                let restart_worker = {
+                    let mut unhealthy_since = self
+                        .0
+                        .unhealthy_since
+                        .lock()
+                        .expect("unhealthy-streak mutex poisoned");
+                    let started_at = *unhealthy_since.get_or_insert(now);
+                    if should_restart_for_sustained_failure(started_at, now) {
+                        // Re-arm immediately rather than after the restart
+                        // completes: the freshly spawned child gets a full
+                        // new streak budget, not zero, and this can't race
+                        // the child's own exit (this is the same thread that
+                        // is about to call stop_child() below). Same
+                        // reasoning for the display counter -- without this,
+                        // the very first status after a just-triggered
+                        // restart would still show the pre-restart count
+                        // (already >= the frontend's escalation threshold),
+                        // reading as "still stuck" about the restart that
+                        // was just supposed to fix it.
+                        *unhealthy_since = None;
+                        self.0
+                            .consecutive_connect_failures
+                            .store(0, Ordering::SeqCst);
+                        true
+                    } else {
+                        false
+                    }
+                };
                 let mut status = self.status();
                 status.state = BridgeState::Reconnecting;
                 status.detail = message.map(str::to_owned);
+                // The worker's own internal reconnect loop keeps running
+                // (and keeps emitting these events) for as long as it stays
+                // alive -- run_loop's separate retry_in_ms, set only on the
+                // child-process-EXIT path below, never fires while that's
+                // true. Without reading delay_ms here too, the countdown
+                // would stay blank for the entire live-retry window, which
+                // is most of a sustained outage.
+                status.retry_in_ms = event.get("delay_ms").and_then(Value::as_u64);
                 status.updated_at = Utc::now().to_rfc3339();
                 self.set_status(status);
+                if restart_worker {
+                    log::warn!(
+                        "bridge unhealthy for over {}s with no successful connection -- restarting the worker",
+                        SUSTAINED_FAILURE_RESTART_AFTER.as_secs()
+                    );
+                    // Not stop() / pause(): `desired` stays true, so
+                    // run_loop's own exited-child detection (already
+                    // polling `self.0.child`) reaps this and respawns
+                    // through its normal path, backoff ladder and all --
+                    // reusing the exact teardown pause()/unpair() already
+                    // use rather than a second kill path with its own
+                    // bookkeeping gaps.
+                    self.stop_child();
+                }
             }
             Some(event_type @ ("dead_credential" | "renewal_rejected")) => {
                 // The worker's own `message` is replaced with fixed prose below
@@ -701,11 +808,30 @@ impl<R: Runtime> Supervisor<R> {
             .agent_identities
             .lock()
             .expect("agent identities mutex poisoned");
+        status.consecutive_connect_failures =
+            self.0.consecutive_connect_failures.load(Ordering::SeqCst);
         *self.0.status.lock().expect("status mutex poisoned") = status.clone();
         if let Some(tray_status) = self.0.app.try_state::<TrayStatus<R>>() {
             tray_status.update(&status);
         }
         let _ = self.0.app.emit("bridge-status", status);
+    }
+
+    // A paused/unpaired/reconfigured bridge isn't mid-connection-attempt --
+    // resetting both here means the next time it actually tries to
+    // reconnect, it starts a fresh streak rather than inheriting an elapsed
+    // duration from before the pause/settings change, which could otherwise
+    // trip the sustained-failure restart on the very first attempt after
+    // resuming.
+    fn reset_failure_tracking(&self) {
+        self.0
+            .consecutive_connect_failures
+            .store(0, Ordering::SeqCst);
+        *self
+            .0
+            .unhealthy_since
+            .lock()
+            .expect("unhealthy-streak mutex poisoned") = None;
     }
 
     fn interruptible_sleep(&self, duration: Duration) {
@@ -1143,6 +1269,13 @@ fn should_reset_backoff(connected_at: Option<Instant>) -> bool {
     connected_at.is_some_and(|value| value.elapsed() >= HEALTHY_CONNECTION_RESET_AFTER)
 }
 
+/// Pure so this is testable with synthetic `Instant`s rather than a real
+/// multi-minute sleep -- takes `now` explicitly (`Instant::now()` at the
+/// call site otherwise) for the same reason.
+fn should_restart_for_sustained_failure(unhealthy_since: Instant, now: Instant) -> bool {
+    now.duration_since(unhealthy_since) >= SUSTAINED_FAILURE_RESTART_AFTER
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1365,6 +1498,144 @@ mod tests {
         supervisor.handle_event(r#"{"type":"connected","base_url":"https://example.com"}"#);
 
         assert_eq!(supervisor.status().state, BridgeState::Connected);
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn should_restart_for_sustained_failure_only_after_the_threshold_elapses() {
+        let now = Instant::now();
+        assert!(!should_restart_for_sustained_failure(now, now));
+        assert!(!should_restart_for_sustained_failure(
+            now - (SUSTAINED_FAILURE_RESTART_AFTER - Duration::from_secs(1)),
+            now
+        ));
+        assert!(should_restart_for_sustained_failure(
+            now - SUSTAINED_FAILURE_RESTART_AFTER,
+            now
+        ));
+    }
+
+    #[test]
+    fn connect_failed_increments_the_visible_failure_counter_disconnected_does_not() {
+        let app = tauri::test::mock_app();
+        let data_dir = test_data_dir("failure-counter");
+        let supervisor = Supervisor::new(app.handle().clone(), data_dir.clone()).unwrap();
+        supervisor.0.desired.store(true, Ordering::SeqCst);
+
+        supervisor.handle_event(r#"{"type":"connect_failed","message":"boom"}"#);
+        assert_eq!(supervisor.status().consecutive_connect_failures, 1);
+
+        supervisor.handle_event(r#"{"type":"disconnected"}"#);
+        assert_eq!(
+            supervisor.status().consecutive_connect_failures,
+            1,
+            "disconnected must not bump the connect-failure counter"
+        );
+
+        supervisor.handle_event(r#"{"type":"connect_failed","message":"boom again"}"#);
+        assert_eq!(supervisor.status().consecutive_connect_failures, 2);
+
+        supervisor.handle_event(r#"{"type":"connected","base_url":"https://example.com"}"#);
+        assert_eq!(supervisor.status().consecutive_connect_failures, 0);
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn connect_failed_and_disconnected_carry_the_worker_own_retry_countdown() {
+        // The worker's internal reconnect loop keeps running (and keeps
+        // reporting) for as long as the process is alive -- run_loop's own
+        // retry_in_ms only ever fires once the child has actually exited,
+        // which doesn't happen while a live worker is retrying on its own.
+        // Without reading delay_ms from these events too, the frontend's
+        // countdown would stay blank for that entire window.
+        let app = tauri::test::mock_app();
+        let data_dir = test_data_dir("retry-countdown-from-worker");
+        let supervisor = Supervisor::new(app.handle().clone(), data_dir.clone()).unwrap();
+        supervisor.0.desired.store(true, Ordering::SeqCst);
+
+        supervisor.handle_event(r#"{"type":"connect_failed","message":"boom","delay_ms":5000}"#);
+        assert_eq!(supervisor.status().retry_in_ms, Some(5000));
+
+        supervisor.handle_event(r#"{"type":"disconnected","delay_ms":10000}"#);
+        assert_eq!(supervisor.status().retry_in_ms, Some(10000));
+
+        supervisor.handle_event(r#"{"type":"connected","base_url":"https://example.com"}"#);
+        assert_eq!(
+            supervisor.status().retry_in_ms,
+            None,
+            "a successful connect must clear the leftover countdown, not leave the last one stale"
+        );
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn a_fresh_connect_failure_streak_does_not_restart_the_worker() {
+        let app = tauri::test::mock_app();
+        let data_dir = test_data_dir("short-failure-streak");
+        let supervisor = Supervisor::new(app.handle().clone(), data_dir.clone()).unwrap();
+        supervisor.0.desired.store(true, Ordering::SeqCst);
+        *supervisor.0.child.lock().unwrap() = Some(sleeping_child());
+
+        supervisor.handle_event(r#"{"type":"connect_failed","message":"boom"}"#);
+
+        assert!(
+            supervisor.0.child.lock().unwrap().is_some(),
+            "a failure streak still under the threshold must not restart the worker"
+        );
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn a_sustained_connect_failure_streak_restarts_the_worker_and_re_arms() {
+        let app = tauri::test::mock_app();
+        let data_dir = test_data_dir("sustained-failure-restart");
+        let supervisor = Supervisor::new(app.handle().clone(), data_dir.clone()).unwrap();
+        supervisor.0.desired.store(true, Ordering::SeqCst);
+        *supervisor.0.child.lock().unwrap() = Some(sleeping_child());
+        // Simulates a streak that's already been unhealthy past the
+        // threshold by the time this next connect_failed arrives.
+        *supervisor.0.unhealthy_since.lock().unwrap() =
+            Some(Instant::now() - SUSTAINED_FAILURE_RESTART_AFTER);
+        supervisor
+            .0
+            .consecutive_connect_failures
+            .store(9, Ordering::SeqCst);
+
+        supervisor.handle_event(r#"{"type":"connect_failed","message":"still down"}"#);
+
+        assert!(
+            supervisor.0.child.lock().unwrap().is_none(),
+            "a sustained failure must kill the wedged child so run_loop respawns it"
+        );
+        assert!(
+            supervisor.0.unhealthy_since.lock().unwrap().is_none(),
+            "the streak must re-arm after triggering a restart, not stay tripped"
+        );
+        assert_eq!(
+            supervisor.status().consecutive_connect_failures,
+            0,
+            "the freshly restarted child must not inherit the pre-restart escalated count"
+        );
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn pausing_resets_the_failure_streak_so_a_stale_duration_cannot_restart_on_resume() {
+        let app = tauri::test::mock_app();
+        let data_dir = test_data_dir("pause-resets-failure-streak");
+        let supervisor = Supervisor::new(app.handle().clone(), data_dir.clone()).unwrap();
+        supervisor.0.desired.store(true, Ordering::SeqCst);
+        *supervisor.0.unhealthy_since.lock().unwrap() =
+            Some(Instant::now() - SUSTAINED_FAILURE_RESTART_AFTER);
+        supervisor
+            .0
+            .consecutive_connect_failures
+            .store(3, Ordering::SeqCst);
+
+        supervisor.pause();
+
+        assert!(supervisor.0.unhealthy_since.lock().unwrap().is_none());
+        assert_eq!(supervisor.status().consecutive_connect_failures, 0);
         let _ = fs::remove_dir_all(data_dir);
     }
 

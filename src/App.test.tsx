@@ -12,7 +12,7 @@ const WORKER_CRASH = "Fatal process out of memory: Failed to reserve virtual mem
 // status. Mocking the app's own api module instead makes every state,
 // including paired/connected, reachable and stubbable per-test.
 const { mockApi } = vi.hoisted(() => {
-  const unpairedStatus: BridgeStatus = { state: "unpaired", base_url: null, bridge_id: null, detail: null, retry_in_ms: null, updated_at: new Date().toISOString(), agent_identities: null };
+  const unpairedStatus: BridgeStatus = { state: "unpaired", base_url: null, bridge_id: null, detail: null, retry_in_ms: null, updated_at: new Date().toISOString(), agent_identities: null, consecutive_connect_failures: 0 };
   const defaultSettings: Settings = { ssh_auth_sock: "", insecure: false, launch_at_login: false };
   return {
     mockApi: {
@@ -36,8 +36,8 @@ const { mockApi } = vi.hoisted(() => {
 
 vi.mock("./api", () => ({ api: mockApi }));
 
-const connectedStatus: BridgeStatus = { state: "connected", base_url: "https://mullion.example", bridge_id: "bridge-123", detail: null, retry_in_ms: null, updated_at: new Date().toISOString(), agent_identities: null };
-const unpairedStatus: BridgeStatus = { state: "unpaired", base_url: null, bridge_id: null, detail: null, retry_in_ms: null, updated_at: new Date().toISOString(), agent_identities: null };
+const connectedStatus: BridgeStatus = { state: "connected", base_url: "https://mullion.example", bridge_id: "bridge-123", detail: null, retry_in_ms: null, updated_at: new Date().toISOString(), agent_identities: null, consecutive_connect_failures: 0 };
+const unpairedStatus: BridgeStatus = { state: "unpaired", base_url: null, bridge_id: null, detail: null, retry_in_ms: null, updated_at: new Date().toISOString(), agent_identities: null, consecutive_connect_failures: 0 };
 
 describe("Mullion Helper window", () => {
   it("shows the pairing workflow when no bridge is paired", async () => {
@@ -110,7 +110,7 @@ describe("Mullion Helper window", () => {
     // everything -- simulate it reporting that via the post-rejection
     // refresh, rather than leaving the pre-unpair "connected" status
     // showing as if nothing had changed.
-    const errorStatus: BridgeStatus = { state: "error", base_url: null, bridge_id: null, detail: "could not record completion of the legacy migration", retry_in_ms: null, updated_at: new Date().toISOString(), agent_identities: null };
+    const errorStatus: BridgeStatus = { state: "error", base_url: null, bridge_id: null, detail: "could not record completion of the legacy migration", retry_in_ms: null, updated_at: new Date().toISOString(), agent_identities: null, consecutive_connect_failures: 0 };
     mockApi.status.mockResolvedValueOnce(connectedStatus).mockResolvedValueOnce(errorStatus);
     mockApi.unpair.mockRejectedValueOnce(new Error("worker unreachable"));
     render(<App />);
@@ -194,5 +194,26 @@ describe("Mullion Helper window", () => {
     render(<App />);
     await screen.findByText("SSH agent unavailable");
     expect(screen.queryByText(/no identities loaded/)).not.toBeInTheDocument();
+  });
+
+  it("renders the retry countdown while reconnecting", async () => {
+    mockApi.status.mockResolvedValueOnce({ ...connectedStatus, state: "reconnecting", retry_in_ms: 5000, consecutive_connect_failures: 1 });
+    render(<App />);
+    expect(await screen.findByText("Retrying in 5s")).toBeVisible();
+  });
+
+  it("escalates the reconnecting indicator once the failure streak passes the threshold", async () => {
+    mockApi.status.mockResolvedValueOnce({ ...connectedStatus, state: "reconnecting", retry_in_ms: 30000, consecutive_connect_failures: 5 });
+    const { container } = render(<App />);
+    expect(await screen.findByText(/this has been failing for a while/)).toBeVisible();
+    expect(container.querySelector(".orb.reconnecting.escalated")).toBeInTheDocument();
+  });
+
+  it("does not escalate a fresh reconnect attempt", async () => {
+    mockApi.status.mockResolvedValueOnce({ ...connectedStatus, state: "reconnecting", retry_in_ms: 1000, consecutive_connect_failures: 1 });
+    const { container } = render(<App />);
+    await screen.findByText("Retrying in 1s");
+    expect(screen.queryByText(/this has been failing for a while/)).not.toBeInTheDocument();
+    expect(container.querySelector(".orb.reconnecting.escalated")).not.toBeInTheDocument();
   });
 });

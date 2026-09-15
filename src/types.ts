@@ -1,5 +1,5 @@
 export type BridgeState = "unpaired" | "starting" | "connected" | "reconnecting" | "paused" | "needs_pairing" | "agent_unavailable" | "error";
-export interface BridgeStatus { state: BridgeState; base_url: string | null; bridge_id: string | null; detail: string | null; retry_in_ms: number | null; updated_at: string; agent_identities: number | null; }
+export interface BridgeStatus { state: BridgeState; base_url: string | null; bridge_id: string | null; detail: string | null; retry_in_ms: number | null; updated_at: string; agent_identities: number | null; consecutive_connect_failures: number; }
 export interface Settings { ssh_auth_sock: string; insecure: boolean; launch_at_login: boolean; }
 export interface AgentCandidate { path: string; label: string; reachable: boolean; identities: number | null; }
 export interface AgentSocketList { candidates: AgentCandidate[]; chosen: string | null; }

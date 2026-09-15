@@ -191,6 +191,74 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// PR "instrument and auto-recover the reconnect loop" — before this, every
+// WebSocket-level failure (DNS, TCP refused/timeout, TLS verification, a
+// non-101 upgrade response) collapsed into the same fixed string,
+// "connection error", discarding the one piece of information (the actual
+// cause) that would have let a 4-hour outage be diagnosed in one log read
+// instead of by hand correlating system logs after the fact. Node's
+// WebSocket (undici-backed) attaches the real cause to the "error" event as
+// `event.error`, a Node system error carrying `.code` — sometimes one level
+// down via `.cause` (undici wraps some of its own connector errors). A
+// handshake that reaches the server and gets rejected with a non-101 status
+// (misrouted proxy, wrong path, a load balancer serving an HTML error page)
+// produces an error with NO such code at all — undici surfaces it as a
+// plain "unexpected server response" failure — which is exactly the other
+// branch below, and on its own is a materially different signal ("we
+// reached something, but it isn't this server") from every code'd case
+// ("we never reached anything").
+//
+// Deliberately does NOT echo the underlying error's free-form `.message`:
+// this flows into a persisted log file (Supervisor::handle_stderr) and the
+// "Copy details" button, so an unrecognized failure names only its `.code`
+// (or nothing, for the no-code case) rather than arbitrary text a
+// misbehaving or compromised server-adjacent component could shape.
+const WS_ERROR_CODE_PHRASES = {
+  ENOTFOUND: "could not resolve the server's hostname",
+  EAI_AGAIN: "temporary DNS resolution failure",
+  ECONNREFUSED: "connection refused by the server",
+  EHOSTUNREACH: "no route to the server",
+  ENETUNREACH: "network unreachable",
+  ETIMEDOUT: "connection attempt timed out",
+  ECONNRESET: "connection reset while connecting",
+  EPROTO: "TLS/protocol error while connecting",
+  DEPTH_ZERO_SELF_SIGNED_CERT:
+    "server certificate is self-signed — see Settings → Allow self-signed TLS certificates",
+  SELF_SIGNED_CERT_IN_CHAIN:
+    "server certificate chain includes a self-signed certificate — see Settings → Allow self-signed TLS certificates",
+  UNABLE_TO_VERIFY_LEAF_SIGNATURE:
+    "server certificate not trusted — see Settings → Allow self-signed TLS certificates",
+  ERR_TLS_CERT_ALTNAME_INVALID: "server certificate does not match the hostname",
+  CERT_HAS_EXPIRED: "server certificate has expired",
+};
+
+// Bounded, not `while (error)`: a malicious or merely buggy `.cause` chain
+// could otherwise be made circular or unbounded, turning a log line into a
+// hang or a stack overflow. 5 is generous — undici's own connector errors
+// nest at most two or three deep in practice (e.g. a Happy-Eyeballs
+// AggregateError wrapping a per-attempt ConnectTimeoutError wrapping the
+// raw system error) — so this only ever gives up on a shape nothing real
+// produces.
+const MAX_WS_ERROR_CAUSE_DEPTH = 5;
+
+function firstErrorCode(error) {
+  let current = error;
+  for (let depth = 0; current != null && depth < MAX_WS_ERROR_CAUSE_DEPTH; depth++) {
+    if (typeof current.code === "string") return current.code;
+    current = current.cause;
+  }
+  return undefined;
+}
+
+export function describeWsError(event) {
+  const code = firstErrorCode(event?.error);
+  if (typeof code !== "string") {
+    return "server did not complete the WebSocket upgrade";
+  }
+  const phrase = WS_ERROR_CODE_PHRASES[code];
+  return phrase ? `${phrase} (${code})` : `connection error (${code})`;
+}
+
 /** Opens `ws`, sends `message` as the first (JSON, text) frame per
  * routes/agent-bridge.ts's ClientHandshake protocol, and resolves with the
  * server's `{type:"ready", ...}` reply — leaving `ws` open and undrained of
@@ -279,11 +347,11 @@ function handshake(ws, message) {
       resolve(parsed);
     }
 
-    function onError() {
+    function onError(event) {
       if (settled) return;
       settled = true;
       cleanup();
-      reject(new Error("connection error"));
+      reject(new Error(`connection error: ${describeWsError(event)}`));
     }
 
     function onClose() {
@@ -834,13 +902,26 @@ async function runRun(args, io) {
     // whether a concurrent renewal already moved credential.sessionId on
     // from under it (see renewalPromise's own comment above).
     const presentedSessionId = credential.sessionId;
+    // Hoisted out of the try block (toWsUrl below assigns it) so the catch
+    // block can still name the target that was actually attempted, even
+    // though the attempt failed -- otherwise "connect failed" carries no
+    // more information than "something, somewhere, didn't work".
+    let wsUrl;
+    // Set by either branch below to { type, data } -- "disconnected" or
+    // "connect_failed" -- and emitted once `delay` is known, after the
+    // try/catch, so the event can carry it. Left null for every other
+    // outcome (a successful connect, a stale-rejection retry with no event
+    // at all, or dead_credential/HandshakeRejectedError, which emit their
+    // own event and return before delay is ever computed).
+    let reconnectEvent = null;
     try {
       // Issue #1049 (Task 4) — same --insecure handling as runPair: when
       // set, attach INSECURE_DISPATCHER so a self-signed primary's WS
       // handshake can complete.
-      const { url: wsUrl, insecure } = toWsUrl(credential.baseUrl, "/ws/agent-bridge", {
+      const { url, insecure } = toWsUrl(credential.baseUrl, "/ws/agent-bridge", {
         insecure: flags.insecure,
       });
+      wsUrl = url;
       const ws = new WebSocket(wsUrl, insecure ? { dispatcher: INSECURE_DISPATCHER } : undefined);
       activeWs = ws;
       const ready = await handshake(ws, {
@@ -898,7 +979,7 @@ async function runRun(args, io) {
       await new Promise((resolve) => mux.onClose(resolve));
       if (stopped) break;
       io.stderr.write("disconnected — reconnecting...\n");
-      emitEvent("disconnected");
+      reconnectEvent = { type: "disconnected", data: {} };
     } catch (err) {
       if (err instanceof HandshakeRejectedError) {
         // A renewal that was in flight when this rejection arrived might be
@@ -923,12 +1004,20 @@ async function runRun(args, io) {
           return 1;
         }
       } else {
-        io.stderr.write(`connect failed: ${err.message}\n`);
-        emitEvent("connect_failed", { message: err.message });
+        io.stderr.write(`connect failed (${wsUrl ?? "unknown target"}): ${err.message}\n`);
+        reconnectEvent = { type: "connect_failed", data: { message: err.message, url: wsUrl ?? null } };
       }
     }
     if (stopped) break;
     const delay = RECONNECT_DELAYS_MS[Math.min(attempt, RECONNECT_DELAYS_MS.length - 1)];
+    // Emitted here, not at the "disconnected"/"connect_failed" call sites
+    // above, specifically so it can carry `delay_ms` -- the supervisor's
+    // Reconnecting status otherwise has no way to render a retry countdown
+    // while THIS process is still alive and retrying internally (its own
+    // retry_in_ms is only ever set on the separate child-process-exit path,
+    // supervisor.rs's run_loop, which doesn't fire for as long as this
+    // worker keeps running and reconnecting on its own).
+    if (reconnectEvent) emitEvent(reconnectEvent.type, { ...reconnectEvent.data, delay_ms: delay });
     attempt++;
     await sleep(delay);
   }
