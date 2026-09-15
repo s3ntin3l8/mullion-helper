@@ -6,13 +6,13 @@ import type { AgentCandidate, BridgeStatus, Notice, Settings } from "./types";
 
 const CUSTOM_PATH = "__custom__";
 
-// Mirrors `choose_best` in src-tauri/src/supervisor.rs for display only —
-// this never decides which socket is actually used, it only labels what
-// auto-detect would pick so "Auto-detect" isn't shown as an unexplained
-// no-op in the dropdown. If that ranking ever changes, update this too.
-function describeAutoDetect(candidates: AgentCandidate[]): string {
-  const winner = candidates.find((candidate) => (candidate.identities ?? 0) > 0)
-    ?? candidates.find((candidate) => candidate.reachable);
+// `chosenPath` comes straight from the backend's `list_agent_sockets`
+// command, which computes it with the same `choose_best` `resolve_agent`
+// uses -- this only looks up that candidate's label for display, it never
+// re-derives the ranking, so the "Auto-detect (...)" text can't drift from
+// what auto-detect actually picks.
+function describeAutoDetect(candidates: AgentCandidate[], chosenPath: string | null): string {
+  const winner = chosenPath == null ? undefined : candidates.find((candidate) => candidate.path === chosenPath);
   if (!winner) return "Auto-detect (no agent found)";
   const identities = winner.identities == null ? "connected" : `${winner.identities} ${winner.identities === 1 ? "identity" : "identities"}`;
   return `Auto-detect (${winner.label} — ${identities})`;
@@ -63,9 +63,12 @@ export function App() {
   const [version, setVersion] = useState<string | null>(null);
   const [appName, setAppName] = useState("Mullion Helper");
   const [agentCandidates, setAgentCandidates] = useState<AgentCandidate[]>([]);
+  const [autoDetectChosenPath, setAutoDetectChosenPath] = useState<string | null>(null);
   const [manualCustomSocket, setManualCustomSocket] = useState(false);
   const loadAgentCandidates = useCallback(async () => {
-    setAgentCandidates(await api.listAgentSockets());
+    const result = await api.listAgentSockets();
+    setAgentCandidates(result.candidates);
+    setAutoDetectChosenPath(result.chosen);
   }, []);
   const refresh = useCallback(async () => {
     const [nextStatus, nextSettings] = await Promise.all([api.status(), api.settings()]);
@@ -218,7 +221,7 @@ export function App() {
               }
             }}
           >
-            <option value="">{describeAutoDetect(agentCandidates)}</option>
+            <option value="">{describeAutoDetect(agentCandidates, autoDetectChosenPath)}</option>
             {agentCandidates.map((candidate) => <option key={candidate.path} value={candidate.path}>{describeCandidate(candidate)}</option>)}
             <option value={CUSTOM_PATH}>Custom path…</option>
           </select>

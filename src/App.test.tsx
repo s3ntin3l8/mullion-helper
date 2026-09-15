@@ -2,7 +2,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { App } from "./App";
-import type { AgentCandidate, BridgeStatus, Settings } from "./types";
+import type { AgentSocketList, BridgeStatus, Settings } from "./types";
 
 const WORKER_CRASH = "Fatal process out of memory: Failed to reserve virtual memory for CodeRange\n----- Native stack trace -----\n1: node::Start(int, char**)\n2: start";
 
@@ -19,7 +19,7 @@ const { mockApi } = vi.hoisted(() => {
       isDesktop: false,
       status: vi.fn(async (): Promise<BridgeStatus> => unpairedStatus),
       settings: vi.fn(async (): Promise<Settings> => defaultSettings),
-      listAgentSockets: vi.fn(async (): Promise<AgentCandidate[]> => []),
+      listAgentSockets: vi.fn(async (): Promise<AgentSocketList> => ({ candidates: [], chosen: null })),
       pair: vi.fn(async (): Promise<BridgeStatus> => { throw WORKER_CRASH; }),
       unpair: vi.fn(async (): Promise<BridgeStatus> => unpairedStatus),
       start: vi.fn(async (): Promise<BridgeStatus> => unpairedStatus),
@@ -129,10 +129,13 @@ describe("Mullion Helper window", () => {
   });
 
   it("lists detected SSH agent candidates in the dropdown, labelled with their identity counts", async () => {
-    mockApi.listAgentSockets.mockResolvedValueOnce([
-      { path: "/1p", label: "1Password", reachable: true, identities: 3 },
-      { path: "/launchd", label: "macOS login agent", reachable: true, identities: 0 },
-    ]);
+    mockApi.listAgentSockets.mockResolvedValueOnce({
+      candidates: [
+        { path: "/1p", label: "1Password", reachable: true, identities: 3 },
+        { path: "/launchd", label: "macOS login agent", reachable: true, identities: 0 },
+      ],
+      chosen: "/1p",
+    });
     render(<App />);
     await screen.findByText("Connect this computer");
 
@@ -144,7 +147,7 @@ describe("Mullion Helper window", () => {
 
   it("keeps a stored socket path that isn't in the detected list selected as Custom, with the text input visible", async () => {
     mockApi.settings.mockResolvedValueOnce({ ssh_auth_sock: "/opt/custom-agent.sock", insecure: false, launch_at_login: false });
-    mockApi.listAgentSockets.mockResolvedValueOnce([{ path: "/1p", label: "1Password", reachable: true, identities: 3 }]);
+    mockApi.listAgentSockets.mockResolvedValueOnce({ candidates: [{ path: "/1p", label: "1Password", reachable: true, identities: 3 }], chosen: "/1p" });
     render(<App />);
     await screen.findByText("Connect this computer");
 
@@ -155,7 +158,7 @@ describe("Mullion Helper window", () => {
 
   it("selecting Custom path… reveals the free-text socket input", async () => {
     const user = userEvent.setup();
-    mockApi.listAgentSockets.mockResolvedValueOnce([{ path: "/1p", label: "1Password", reachable: true, identities: 3 }]);
+    mockApi.listAgentSockets.mockResolvedValueOnce({ candidates: [{ path: "/1p", label: "1Password", reachable: true, identities: 3 }], chosen: "/1p" });
     render(<App />);
     await screen.findByText("Connect this computer");
 

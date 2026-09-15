@@ -2,5 +2,6 @@ export type BridgeState = "unpaired" | "starting" | "connected" | "reconnecting"
 export interface BridgeStatus { state: BridgeState; base_url: string | null; bridge_id: string | null; detail: string | null; retry_in_ms: number | null; updated_at: string; agent_identities: number | null; }
 export interface Settings { ssh_auth_sock: string; insecure: boolean; launch_at_login: boolean; }
 export interface AgentCandidate { path: string; label: string; reachable: boolean; identities: number | null; }
+export interface AgentSocketList { candidates: AgentCandidate[]; chosen: string | null; }
 export interface UpdateResult { available: boolean; version: string | null; }
 export interface Notice { kind: "info" | "error"; summary: string; details?: string; }

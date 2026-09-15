@@ -50,18 +50,18 @@ describe("api.version", () => {
 });
 
 describe("api.listAgentSockets", () => {
-  it("resolves to an empty list outside a Tauri window, without invoking the backend", async () => {
+  it("resolves to an empty, unresolved list outside a Tauri window, without invoking the backend", async () => {
     const { api } = await import("./api");
-    await expect(api.listAgentSockets()).resolves.toEqual([]);
+    await expect(api.listAgentSockets()).resolves.toEqual({ candidates: [], chosen: null });
     expect(invokeMock).not.toHaveBeenCalled();
   });
 
   it("invokes list_agent_sockets when running inside Tauri", async () => {
     (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
-    const candidates = [{ path: "/1p", label: "1Password", reachable: true, identities: 3 }];
-    invokeMock.mockResolvedValue(candidates);
+    const result = { candidates: [{ path: "/1p", label: "1Password", reachable: true, identities: 3 }], chosen: "/1p" };
+    invokeMock.mockResolvedValue(result);
     const { api } = await import("./api");
-    await expect(api.listAgentSockets()).resolves.toEqual(candidates);
+    await expect(api.listAgentSockets()).resolves.toEqual(result);
     expect(invokeMock).toHaveBeenCalledWith("list_agent_sockets");
   });
 });

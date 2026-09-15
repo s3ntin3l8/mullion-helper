@@ -928,10 +928,23 @@ fn resolve_agent_socket(settings: &Settings) -> Option<String> {
 }
 
 /// Probed once per resolution against every auto-detect candidate, and
-/// exposed to the frontend as-is via the `list_agent_sockets` command so the
-/// Settings dropdown shows exactly what auto-detect would choose from.
-pub fn list_agent_sockets() -> Vec<AgentCandidate> {
-    probe_candidates(agent_candidate_paths())
+/// exposed to the frontend via the `list_agent_sockets` command so the
+/// Settings dropdown shows exactly what auto-detect would choose from --
+/// `chosen` is computed here with the same `choose_best` `resolve_agent`
+/// uses, rather than left for the frontend to re-derive, so there is only
+/// ever one place that knows the ranking and the dropdown's "Auto-detect
+/// (...)" label can never silently drift from what auto-detect actually
+/// does.
+#[derive(Serialize)]
+pub struct AgentSocketList {
+    pub candidates: Vec<AgentCandidate>,
+    pub chosen: Option<String>,
+}
+
+pub fn list_agent_sockets() -> AgentSocketList {
+    let candidates = probe_candidates(agent_candidate_paths());
+    let chosen = choose_best(&candidates).map(|candidate| candidate.path.clone());
+    AgentSocketList { candidates, chosen }
 }
 
 /// Connects to `path` and asks it for its identity count. This is a direct,
