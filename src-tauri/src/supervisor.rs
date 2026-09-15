@@ -704,6 +704,14 @@ impl<R: Runtime> Supervisor<R> {
                 let mut status = self.status();
                 status.state = BridgeState::Reconnecting;
                 status.detail = message.map(str::to_owned);
+                // The worker's own internal reconnect loop keeps running
+                // (and keeps emitting these events) for as long as it stays
+                // alive -- run_loop's separate retry_in_ms, set only on the
+                // child-process-EXIT path below, never fires while that's
+                // true. Without reading delay_ms here too, the countdown
+                // would stay blank for the entire live-retry window, which
+                // is most of a sustained outage.
+                status.retry_in_ms = event.get("delay_ms").and_then(Value::as_u64);
                 status.updated_at = Utc::now().to_rfc3339();
                 self.set_status(status);
                 if restart_worker {
@@ -1529,6 +1537,34 @@ mod tests {
 
         supervisor.handle_event(r#"{"type":"connected","base_url":"https://example.com"}"#);
         assert_eq!(supervisor.status().consecutive_connect_failures, 0);
+        let _ = fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn connect_failed_and_disconnected_carry_the_worker_own_retry_countdown() {
+        // The worker's internal reconnect loop keeps running (and keeps
+        // reporting) for as long as the process is alive -- run_loop's own
+        // retry_in_ms only ever fires once the child has actually exited,
+        // which doesn't happen while a live worker is retrying on its own.
+        // Without reading delay_ms from these events too, the frontend's
+        // countdown would stay blank for that entire window.
+        let app = tauri::test::mock_app();
+        let data_dir = test_data_dir("retry-countdown-from-worker");
+        let supervisor = Supervisor::new(app.handle().clone(), data_dir.clone()).unwrap();
+        supervisor.0.desired.store(true, Ordering::SeqCst);
+
+        supervisor.handle_event(r#"{"type":"connect_failed","message":"boom","delay_ms":5000}"#);
+        assert_eq!(supervisor.status().retry_in_ms, Some(5000));
+
+        supervisor.handle_event(r#"{"type":"disconnected","delay_ms":10000}"#);
+        assert_eq!(supervisor.status().retry_in_ms, Some(10000));
+
+        supervisor.handle_event(r#"{"type":"connected","base_url":"https://example.com"}"#);
+        assert_eq!(
+            supervisor.status().retry_in_ms,
+            None,
+            "a successful connect must clear the leftover countdown, not leave the last one stale"
+        );
         let _ = fs::remove_dir_all(data_dir);
     }
 

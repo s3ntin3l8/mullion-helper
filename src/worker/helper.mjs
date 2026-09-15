@@ -907,6 +907,13 @@ async function runRun(args, io) {
     // though the attempt failed -- otherwise "connect failed" carries no
     // more information than "something, somewhere, didn't work".
     let wsUrl;
+    // Set by either branch below to { type, data } -- "disconnected" or
+    // "connect_failed" -- and emitted once `delay` is known, after the
+    // try/catch, so the event can carry it. Left null for every other
+    // outcome (a successful connect, a stale-rejection retry with no event
+    // at all, or dead_credential/HandshakeRejectedError, which emit their
+    // own event and return before delay is ever computed).
+    let reconnectEvent = null;
     try {
       // Issue #1049 (Task 4) — same --insecure handling as runPair: when
       // set, attach INSECURE_DISPATCHER so a self-signed primary's WS
@@ -972,7 +979,7 @@ async function runRun(args, io) {
       await new Promise((resolve) => mux.onClose(resolve));
       if (stopped) break;
       io.stderr.write("disconnected — reconnecting...\n");
-      emitEvent("disconnected");
+      reconnectEvent = { type: "disconnected", data: {} };
     } catch (err) {
       if (err instanceof HandshakeRejectedError) {
         // A renewal that was in flight when this rejection arrived might be
@@ -998,11 +1005,19 @@ async function runRun(args, io) {
         }
       } else {
         io.stderr.write(`connect failed (${wsUrl ?? "unknown target"}): ${err.message}\n`);
-        emitEvent("connect_failed", { message: err.message, url: wsUrl ?? null });
+        reconnectEvent = { type: "connect_failed", data: { message: err.message, url: wsUrl ?? null } };
       }
     }
     if (stopped) break;
     const delay = RECONNECT_DELAYS_MS[Math.min(attempt, RECONNECT_DELAYS_MS.length - 1)];
+    // Emitted here, not at the "disconnected"/"connect_failed" call sites
+    // above, specifically so it can carry `delay_ms` -- the supervisor's
+    // Reconnecting status otherwise has no way to render a retry countdown
+    // while THIS process is still alive and retrying internally (its own
+    // retry_in_ms is only ever set on the separate child-process-exit path,
+    // supervisor.rs's run_loop, which doesn't fire for as long as this
+    // worker keeps running and reconnecting on its own).
+    if (reconnectEvent) emitEvent(reconnectEvent.type, { ...reconnectEvent.data, delay_ms: delay });
     attempt++;
     await sleep(delay);
   }
