@@ -232,8 +232,26 @@ const WS_ERROR_CODE_PHRASES = {
   CERT_HAS_EXPIRED: "server certificate has expired",
 };
 
+// Bounded, not `while (error)`: a malicious or merely buggy `.cause` chain
+// could otherwise be made circular or unbounded, turning a log line into a
+// hang or a stack overflow. 5 is generous — undici's own connector errors
+// nest at most two or three deep in practice (e.g. a Happy-Eyeballs
+// AggregateError wrapping a per-attempt ConnectTimeoutError wrapping the
+// raw system error) — so this only ever gives up on a shape nothing real
+// produces.
+const MAX_WS_ERROR_CAUSE_DEPTH = 5;
+
+function firstErrorCode(error) {
+  let current = error;
+  for (let depth = 0; current != null && depth < MAX_WS_ERROR_CAUSE_DEPTH; depth++) {
+    if (typeof current.code === "string") return current.code;
+    current = current.cause;
+  }
+  return undefined;
+}
+
 export function describeWsError(event) {
-  const code = event?.error?.code ?? event?.error?.cause?.code;
+  const code = firstErrorCode(event?.error);
   if (typeof code !== "string") {
     return "server did not complete the WebSocket upgrade";
   }

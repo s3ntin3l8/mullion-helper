@@ -45,6 +45,18 @@ describe("describeWsError", () => {
     expect(describeWsError({ error: { cause: { code: "ECONNRESET" } } })).toBe("connection reset while connecting (ECONNRESET)");
   });
 
+  it("walks multiple levels of .cause (e.g. a Happy-Eyeballs AggregateError wrapping a per-attempt error)", () => {
+    expect(
+      describeWsError({ error: { cause: { cause: { cause: { code: "ETIMEDOUT" } } } } }),
+    ).toBe("connection attempt timed out (ETIMEDOUT)");
+  });
+
+  it("gives up past the bounded cause depth rather than looping forever on a pathological chain", () => {
+    let cause: unknown = { code: "ETIMEDOUT" };
+    for (let i = 0; i < 10; i++) cause = { cause };
+    expect(describeWsError({ error: cause })).toBe("server did not complete the WebSocket upgrade");
+  });
+
   it("still names an unmapped code rather than falling back to the generic message", () => {
     expect(describeWsError({ error: { code: "ESOMETHINGNEW" } })).toBe("connection error (ESOMETHINGNEW)");
   });
