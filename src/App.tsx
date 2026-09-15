@@ -2,7 +2,27 @@ import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { api } from "./api";
-import type { BridgeStatus, Notice, Settings } from "./types";
+import type { AgentCandidate, BridgeStatus, Notice, Settings } from "./types";
+
+const CUSTOM_PATH = "__custom__";
+
+// `chosenPath` comes straight from the backend's `list_agent_sockets`
+// command, which computes it with the same `choose_best` `resolve_agent`
+// uses -- this only looks up that candidate's label for display, it never
+// re-derives the ranking, so the "Auto-detect (...)" text can't drift from
+// what auto-detect actually picks.
+function describeAutoDetect(candidates: AgentCandidate[], chosenPath: string | null): string {
+  const winner = chosenPath == null ? undefined : candidates.find((candidate) => candidate.path === chosenPath);
+  if (!winner) return "Auto-detect (no agent found)";
+  const identities = winner.identities == null ? "connected" : `${winner.identities} ${winner.identities === 1 ? "identity" : "identities"}`;
+  return `Auto-detect (${winner.label} — ${identities})`;
+}
+
+function describeCandidate(candidate: AgentCandidate): string {
+  if (!candidate.reachable) return `${candidate.label} — not reachable`;
+  if (candidate.identities == null) return `${candidate.label} — connected`;
+  return `${candidate.label} — ${candidate.identities} ${candidate.identities === 1 ? "identity" : "identities"}`;
+}
 
 function errorNotice(raw: string): Notice {
   const text = raw.trim();
@@ -42,6 +62,14 @@ export function App() {
   const [copied, setCopied] = useState(false);
   const [version, setVersion] = useState<string | null>(null);
   const [appName, setAppName] = useState("Mullion Helper");
+  const [agentCandidates, setAgentCandidates] = useState<AgentCandidate[]>([]);
+  const [autoDetectChosenPath, setAutoDetectChosenPath] = useState<string | null>(null);
+  const [manualCustomSocket, setManualCustomSocket] = useState(false);
+  const loadAgentCandidates = useCallback(async () => {
+    const result = await api.listAgentSockets();
+    setAgentCandidates(result.candidates);
+    setAutoDetectChosenPath(result.chosen);
+  }, []);
   const refresh = useCallback(async () => {
     const [nextStatus, nextSettings] = await Promise.all([api.status(), api.settings()]);
     if (api.isDesktop) nextSettings.launch_at_login = await isEnabled();
@@ -67,6 +95,10 @@ export function App() {
   useEffect(() => {
     void api.appName().then(setAppName).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    void loadAgentCandidates().catch(() => {});
+  }, [loadAgentCandidates]);
 
   useEffect(() => {
     if (!api.isDesktop) return;
@@ -148,6 +180,16 @@ export function App() {
   const connected = status?.state === "connected";
   const running = status && !["paused", "unpaired", "needs_pairing", "error"].includes(status.state);
   const needsPairing = status && ["unpaired", "needs_pairing"].includes(status.state);
+  // A stored path outside the detected list (e.g. a headless setup, or a
+  // candidate that just isn't reachable right now) must still render as
+  // itself rather than silently reverting to "Auto-detect" -- so custom
+  // mode is shown whenever the stored value doesn't match a known
+  // candidate, in addition to whenever the user explicitly picked it from
+  // the dropdown this session.
+  const knownAgentPaths = agentCandidates.map((candidate) => candidate.path);
+  const storedSocketIsCustom = !!settings?.ssh_auth_sock.trim() && !knownAgentPaths.includes(settings.ssh_auth_sock);
+  const showCustomSocketInput = manualCustomSocket || storedSocketIsCustom;
+  const agentSocketSelectValue = showCustomSocketInput ? CUSTOM_PATH : (settings?.ssh_auth_sock ?? "");
   // Reused for both first-time setup (shown expanded, below) and re-pairing
   // an already-paired computer (shown collapsed inside Settings) — same
   // payload state and the same pair() handler either way.
@@ -162,8 +204,32 @@ export function App() {
       <div className="status-copy"><strong>{status ? labels[status.state] : "Loading…"}</strong><span>{status?.detail ?? (connected ? "Your SSH agent is available to Mullion sessions." : "The tray icon keeps the bridge available in the background.")}</span>{status?.base_url && <small>{status.base_url}</small>}</div>
       {!needsPairing && (running ? <button className="secondary" disabled={busy} onClick={() => void act(api.pause)}>Pause</button> : <button disabled={busy} onClick={() => void act(api.start)}>Start</button>)}
     </section>
+    {connected && status?.agent_identities === 0 && <p className="agent-warning">Your SSH agent is connected but has no identities loaded — unlock it, or check Settings → SSH agent socket.</p>}
     {needsPairing && <section className="panel onboarding"><span className="eyebrow">First-time setup</span><h2>Connect this computer</h2><p>In Mullion, open Settings → Hosts → SSH agent bridges, create a pairing code, then paste the payload below.</p>{pairingForm}</section>}
-    {settings && <section className="panel"><span className="eyebrow">Configuration</span><h2>Settings</h2><label>SSH agent socket<input value={settings.ssh_auth_sock} onChange={(event) => setSettings({ ...settings, ssh_auth_sock: event.target.value })} placeholder="Auto-detect" /></label><p className="hint">Leave blank to detect SSH_AUTH_SOCK, 1Password, or the Windows OpenSSH-compatible pipe.</p><label className="toggle"><input type="checkbox" checked={settings.launch_at_login} onChange={(event) => setSettings({ ...settings, launch_at_login: event.target.checked })} /><span>Launch at login</span></label><label className="toggle"><input type="checkbox" checked={settings.insecure} onChange={(event) => setSettings({ ...settings, insecure: event.target.checked })} /><span>Allow self-signed TLS certificates</span></label><button disabled={busy} onClick={() => void save()}>Save settings</button>
+    {settings && <section className="panel"><span className="eyebrow">Configuration</span><h2>Settings</h2>
+      <label>SSH agent socket
+        <div className="agent-socket-row">
+          <select
+            value={agentSocketSelectValue}
+            onChange={(event) => {
+              const value = event.target.value;
+              if (value === CUSTOM_PATH) {
+                setManualCustomSocket(true);
+              } else {
+                setManualCustomSocket(false);
+                setSettings({ ...settings, ssh_auth_sock: value });
+              }
+            }}
+          >
+            <option value="">{describeAutoDetect(agentCandidates, autoDetectChosenPath)}</option>
+            {agentCandidates.map((candidate) => <option key={candidate.path} value={candidate.path}>{describeCandidate(candidate)}</option>)}
+            <option value={CUSTOM_PATH}>Custom path…</option>
+          </select>
+          <button type="button" className="secondary" disabled={busy} onClick={() => void loadAgentCandidates()}>Re-detect</button>
+        </div>
+      </label>
+      {showCustomSocketInput && <label>Custom socket path<input value={settings.ssh_auth_sock} onChange={(event) => setSettings({ ...settings, ssh_auth_sock: event.target.value })} placeholder="/path/to/agent.sock" /></label>}
+      <p className="hint">Leave on Auto-detect to use SSH_AUTH_SOCK, 1Password, or the Windows OpenSSH-compatible pipe.</p><label className="toggle"><input type="checkbox" checked={settings.launch_at_login} onChange={(event) => setSettings({ ...settings, launch_at_login: event.target.checked })} /><span>Launch at login</span></label><label className="toggle"><input type="checkbox" checked={settings.insecure} onChange={(event) => setSettings({ ...settings, insecure: event.target.checked })} /><span>Allow self-signed TLS certificates</span></label><button disabled={busy} onClick={() => void save()}>Save settings</button>
       {!needsPairing && <div className="repair">
         <details><summary>Re-pair this computer</summary><div className="payload-form">{pairingForm}</div></details>
         <div className="unpair-row">{confirmingUnpair

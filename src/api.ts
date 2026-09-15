@@ -1,14 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion, getName } from "@tauri-apps/api/app";
-import type { BridgeStatus, Settings, UpdateResult } from "./types";
+import type { AgentSocketList, BridgeStatus, Settings, UpdateResult } from "./types";
 
 const inTauri = "__TAURI_INTERNALS__" in window;
-const demoStatus: BridgeStatus = { state: "unpaired", base_url: null, bridge_id: null, detail: null, retry_in_ms: null, updated_at: new Date().toISOString() };
+const demoStatus: BridgeStatus = { state: "unpaired", base_url: null, bridge_id: null, detail: null, retry_in_ms: null, updated_at: new Date().toISOString(), agent_identities: null };
 
 export const api = {
   isDesktop: inTauri,
   status: () => inTauri ? invoke<BridgeStatus>("bridge_status") : Promise.resolve(demoStatus),
   settings: () => inTauri ? invoke<Settings>("get_settings") : Promise.resolve({ ssh_auth_sock: "", insecure: false, launch_at_login: false }),
+  listAgentSockets: () => inTauri ? invoke<AgentSocketList>("list_agent_sockets") : Promise.resolve({ candidates: [], chosen: null }),
   pair: (payload: string) => invoke<BridgeStatus>("pair_bridge", { payload }),
   unpair: () => invoke<BridgeStatus>("unpair_bridge"),
   start: () => invoke<BridgeStatus>("start_bridge"),

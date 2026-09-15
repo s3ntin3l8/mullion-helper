@@ -4,7 +4,7 @@ mod supervisor;
 mod tray_status;
 
 use serde::Serialize;
-use supervisor::{BridgeStatus, Settings, Supervisor};
+use supervisor::{AgentSocketList, BridgeStatus, Settings, Supervisor};
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -31,6 +31,11 @@ fn save_settings(
     supervisor: tauri::State<'_, Supervisor>,
 ) -> Result<Settings, String> {
     supervisor.save_settings(settings)
+}
+
+#[tauri::command]
+fn list_agent_sockets() -> AgentSocketList {
+    supervisor::list_agent_sockets()
 }
 
 #[tauri::command]
@@ -213,6 +218,7 @@ pub fn run() {
             bridge_status,
             get_settings,
             save_settings,
+            list_agent_sockets,
             start_bridge,
             pause_bridge,
             pair_bridge,

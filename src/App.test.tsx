@@ -1,8 +1,8 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { App } from "./App";
-import type { BridgeStatus, Settings } from "./types";
+import type { AgentSocketList, BridgeStatus, Settings } from "./types";
 
 const WORKER_CRASH = "Fatal process out of memory: Failed to reserve virtual memory for CodeRange\n----- Native stack trace -----\n1: node::Start(int, char**)\n2: start";
 
@@ -12,13 +12,14 @@ const WORKER_CRASH = "Fatal process out of memory: Failed to reserve virtual mem
 // status. Mocking the app's own api module instead makes every state,
 // including paired/connected, reachable and stubbable per-test.
 const { mockApi } = vi.hoisted(() => {
-  const unpairedStatus: BridgeStatus = { state: "unpaired", base_url: null, bridge_id: null, detail: null, retry_in_ms: null, updated_at: new Date().toISOString() };
+  const unpairedStatus: BridgeStatus = { state: "unpaired", base_url: null, bridge_id: null, detail: null, retry_in_ms: null, updated_at: new Date().toISOString(), agent_identities: null };
   const defaultSettings: Settings = { ssh_auth_sock: "", insecure: false, launch_at_login: false };
   return {
     mockApi: {
       isDesktop: false,
       status: vi.fn(async (): Promise<BridgeStatus> => unpairedStatus),
       settings: vi.fn(async (): Promise<Settings> => defaultSettings),
+      listAgentSockets: vi.fn(async (): Promise<AgentSocketList> => ({ candidates: [], chosen: null })),
       pair: vi.fn(async (): Promise<BridgeStatus> => { throw WORKER_CRASH; }),
       unpair: vi.fn(async (): Promise<BridgeStatus> => unpairedStatus),
       start: vi.fn(async (): Promise<BridgeStatus> => unpairedStatus),
@@ -35,8 +36,8 @@ const { mockApi } = vi.hoisted(() => {
 
 vi.mock("./api", () => ({ api: mockApi }));
 
-const connectedStatus: BridgeStatus = { state: "connected", base_url: "https://mullion.example", bridge_id: "bridge-123", detail: null, retry_in_ms: null, updated_at: new Date().toISOString() };
-const unpairedStatus: BridgeStatus = { state: "unpaired", base_url: null, bridge_id: null, detail: null, retry_in_ms: null, updated_at: new Date().toISOString() };
+const connectedStatus: BridgeStatus = { state: "connected", base_url: "https://mullion.example", bridge_id: "bridge-123", detail: null, retry_in_ms: null, updated_at: new Date().toISOString(), agent_identities: null };
+const unpairedStatus: BridgeStatus = { state: "unpaired", base_url: null, bridge_id: null, detail: null, retry_in_ms: null, updated_at: new Date().toISOString(), agent_identities: null };
 
 describe("Mullion Helper window", () => {
   it("shows the pairing workflow when no bridge is paired", async () => {
@@ -109,7 +110,7 @@ describe("Mullion Helper window", () => {
     // everything -- simulate it reporting that via the post-rejection
     // refresh, rather than leaving the pre-unpair "connected" status
     // showing as if nothing had changed.
-    const errorStatus: BridgeStatus = { state: "error", base_url: null, bridge_id: null, detail: "could not record completion of the legacy migration", retry_in_ms: null, updated_at: new Date().toISOString() };
+    const errorStatus: BridgeStatus = { state: "error", base_url: null, bridge_id: null, detail: "could not record completion of the legacy migration", retry_in_ms: null, updated_at: new Date().toISOString(), agent_identities: null };
     mockApi.status.mockResolvedValueOnce(connectedStatus).mockResolvedValueOnce(errorStatus);
     mockApi.unpair.mockRejectedValueOnce(new Error("worker unreachable"));
     render(<App />);
@@ -125,5 +126,73 @@ describe("Mullion Helper window", () => {
     // the card should no longer be showing the stale pre-unpair status.
     expect(await screen.findByText("Bridge needs attention")).toBeVisible();
     expect(screen.queryByText("Bridge connected")).not.toBeInTheDocument();
+  });
+
+  it("lists detected SSH agent candidates in the dropdown, labelled with their identity counts", async () => {
+    mockApi.listAgentSockets.mockResolvedValueOnce({
+      candidates: [
+        { path: "/1p", label: "1Password", reachable: true, identities: 3 },
+        { path: "/launchd", label: "macOS login agent", reachable: true, identities: 0 },
+      ],
+      chosen: "/1p",
+    });
+    render(<App />);
+    await screen.findByText("Connect this computer");
+
+    expect(await screen.findByRole("option", { name: "Auto-detect (1Password — 3 identities)" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "1Password — 3 identities" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "macOS login agent — 0 identities" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Custom path…" })).toBeInTheDocument();
+  });
+
+  it("keeps a stored socket path that isn't in the detected list selected as Custom, with the text input visible", async () => {
+    mockApi.settings.mockResolvedValueOnce({ ssh_auth_sock: "/opt/custom-agent.sock", insecure: false, launch_at_login: false });
+    mockApi.listAgentSockets.mockResolvedValueOnce({ candidates: [{ path: "/1p", label: "1Password", reachable: true, identities: 3 }], chosen: "/1p" });
+    render(<App />);
+    await screen.findByText("Connect this computer");
+
+    const select = await screen.findByRole("combobox") as HTMLSelectElement;
+    await waitFor(() => expect(select.value).toBe("__custom__"));
+    expect(screen.getByLabelText("Custom socket path")).toHaveValue("/opt/custom-agent.sock");
+  });
+
+  it("selecting Custom path… reveals the free-text socket input", async () => {
+    const user = userEvent.setup();
+    mockApi.listAgentSockets.mockResolvedValueOnce({ candidates: [{ path: "/1p", label: "1Password", reachable: true, identities: 3 }], chosen: "/1p" });
+    render(<App />);
+    await screen.findByText("Connect this computer");
+
+    expect(screen.queryByLabelText("Custom socket path")).not.toBeInTheDocument();
+    const select = await screen.findByRole("combobox");
+    await user.selectOptions(select, "Custom path…");
+    expect(await screen.findByLabelText("Custom socket path")).toBeInTheDocument();
+  });
+
+  it("re-detects the agent candidate list when Re-detect is clicked", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Connect this computer");
+    const callsBeforeClick = mockApi.listAgentSockets.mock.calls.length;
+
+    await user.click(screen.getByRole("button", { name: "Re-detect" }));
+
+    await waitFor(() => expect(mockApi.listAgentSockets.mock.calls.length).toBeGreaterThan(callsBeforeClick));
+  });
+
+  it("warns when the agent is connected but reports zero identities", async () => {
+    mockApi.status.mockResolvedValueOnce({ ...connectedStatus, agent_identities: 0 });
+    render(<App />);
+    await screen.findByText("Bridge connected");
+    expect(await screen.findByText(/no identities loaded/)).toBeVisible();
+  });
+
+  it("does not show the zero-identity warning outside a connected state, even if a stale count says zero", async () => {
+    // Regression for the Hermes-flagged stale-stamp bug: a prior
+    // resolution's identity count could otherwise leak onto an unrelated
+    // state (e.g. AgentUnavailable) and render a contradictory warning.
+    mockApi.status.mockResolvedValueOnce({ ...unpairedStatus, state: "agent_unavailable", agent_identities: 0 });
+    render(<App />);
+    await screen.findByText("SSH agent unavailable");
+    expect(screen.queryByText(/no identities loaded/)).not.toBeInTheDocument();
   });
 });
