@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.12](https://github.com/s3ntin3l8/mullion-helper/compare/v0.1.11...v0.1.12) (2026-09-15)
+
+
+### Features
+
+* probe SSH agent candidates for real identities, add a Settings dropdown ([#53](https://github.com/s3ntin3l8/mullion-helper/issues/53)) ([258bb03](https://github.com/s3ntin3l8/mullion-helper/commit/258bb03f91ece0ae25ec3198dff5d416ca9a589d))
+
+
+### Bug Fixes
+
+* **worker:** instrument and auto-recover the reconnect loop ([#56](https://github.com/s3ntin3l8/mullion-helper/issues/56)) ([837d17f](https://github.com/s3ntin3l8/mullion-helper/commit/837d17febfc50b7021a3c34a81a1739809cae192))
+
 ## [0.1.11](https://github.com/s3ntin3l8/mullion-helper/compare/v0.1.10...v0.1.11) (2026-09-15)
 
 
