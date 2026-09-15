@@ -27,6 +27,8 @@ const { mockApi } = vi.hoisted(() => {
       checkForUpdates: vi.fn(async () => ({ available: false, version: null as string | null })),
       installUpdate: vi.fn(async (): Promise<void> => undefined),
       diagnosticsPath: vi.fn(async (): Promise<string | null> => null),
+      version: vi.fn(async (): Promise<string | null> => "0.1.10"),
+      appName: vi.fn(async (): Promise<string> => "Mullion Helper"),
     },
   };
 });
@@ -68,8 +70,14 @@ describe("Mullion Helper window", () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
     await user.click(screen.getByRole("button", { name: "Copy details" }));
-    expect(writeText).toHaveBeenCalledWith("----- Native stack trace -----\n1: node::Start(int, char**)\n2: start");
+    expect(writeText).toHaveBeenCalledWith("Mullion Helper 0.1.10\n----- Native stack trace -----\n1: node::Start(int, char**)\n2: start");
     expect(await screen.findByRole("button", { name: "Copied" })).toBeInTheDocument();
+  });
+
+  it("shows the running version in the footer", async () => {
+    render(<App />);
+    await screen.findByText("Connect this computer");
+    expect(await screen.findByText("· v0.1.10")).toBeVisible();
   });
 
   it("offers re-pair and unpair once a bridge is already paired, and unpair round-trips through the API", async () => {

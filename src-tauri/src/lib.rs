@@ -62,12 +62,26 @@ fn diagnostics_path(app: tauri::AppHandle) -> Result<String, String> {
         .app_log_dir()
         // tauri_plugin_log's TargetKind::LogDir { file_name: None } (see the
         // plugin registration below) names the file after
-        // `package_info().name`, i.e. Cargo.toml's package name — not the
-        // "Mullion Helper" productName. Kept as a literal here rather than
-        // read back from the app handle since there's no public API for it;
-        // if the package is ever renamed, `check:versions` won't catch a
-        // drift here, so update this alongside `[package] name` in Cargo.toml.
-        .map(|dir| dir.join("mullion-helper.log").display().to_string())
+        // `package_info().name` — which is `productName` from
+        // tauri.conf.json when set (confirmed against tauri-codegen's
+        // context.rs), not Cargo.toml's package name. This app sets
+        // productName to "Mullion Helper", so the real file is
+        // "Mullion Helper.log". A previous version of this command
+        // hardcoded "mullion-helper.log" (the Cargo package name) on the
+        // opposite, incorrect assumption — read the same value the plugin
+        // actually used instead of a second literal that can drift again.
+        .map(|dir| {
+            // .with_extension, not format!("{}.log", ..): matches the
+            // plugin's own `dir.join(&file_name).with_extension("log")`
+            // exactly, including its "replace, don't append, past the last
+            // dot" behavior — identical for "Mullion Helper" today, but
+            // would silently diverge from what the plugin actually wrote
+            // if productName ever contained a dot.
+            dir.join(&app.package_info().name)
+                .with_extension("log")
+                .display()
+                .to_string()
+        })
         .map_err(|error| error.to_string())
 }
 

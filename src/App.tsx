@@ -40,6 +40,8 @@ export function App() {
   const [updateVersion, setUpdateVersion] = useState<string | null>(null);
   const [diagnosticsPath, setDiagnosticsPath] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [version, setVersion] = useState<string | null>(null);
+  const [appName, setAppName] = useState("Mullion Helper");
   const refresh = useCallback(async () => {
     const [nextStatus, nextSettings] = await Promise.all([api.status(), api.settings()]);
     if (api.isDesktop) nextSettings.launch_at_login = await isEnabled();
@@ -56,6 +58,14 @@ export function App() {
 
   useEffect(() => {
     void api.diagnosticsPath().then(setDiagnosticsPath).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    void api.version().then(setVersion).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    void api.appName().then(setAppName).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -157,7 +167,7 @@ export function App() {
       {!needsPairing && <div className="repair">
         <details><summary>Re-pair this computer</summary><div className="payload-form">{pairingForm}</div></details>
         <div className="unpair-row">{confirmingUnpair
-          ? <span className="confirm">Remove this computer's pairing?<button type="button" className="danger" disabled={busy} onClick={() => void unpair()}>Unpair</button><button type="button" className="link" disabled={busy} onClick={() => setConfirmingUnpair(false)}>Cancel</button></span>
+          ? <span className="confirm">Remove this computer's pairing?<button type="button" className="button-danger" disabled={busy} onClick={() => void unpair()}>Unpair</button><button type="button" className="link" disabled={busy} onClick={() => setConfirmingUnpair(false)}>Cancel</button></span>
           : <button type="button" className="link danger" onClick={() => setConfirmingUnpair(true)}>Unpair this computer</button>}</div>
       </div>}
     </section>}
@@ -169,12 +179,12 @@ export function App() {
             <summary>Show details</summary>
             <pre>{notice.details}</pre>
             <div className="notice-actions">
-              <button type="button" className="link" onClick={() => void copyDetails(notice.details ?? "")}>{copied ? "Copied" : "Copy details"}</button>
+              <button type="button" className="link" onClick={() => void copyDetails(`${appName} ${version ?? "unknown version"}\n${notice.details ?? ""}`)}>{copied ? "Copied" : "Copy details"}</button>
               {diagnosticsPath && <span className="hint">Full log: {diagnosticsPath}</span>}
             </div>
           </details>}
         </section>
       : <p className="notice" role="status">{notice.summary}</p>)}
-    <footer><button className="link" disabled={busy} onClick={() => void checkUpdates()}>Check for updates</button><span>Closing this window keeps the tray app running.</span></footer>
+    <footer><span><button className="link" disabled={busy} onClick={() => void checkUpdates()}>Check for updates</button>{version && <span className="version"> · v{version}</span>}</span><span>Closing this window keeps the tray app running.</span></footer>
   </main>;
 }
