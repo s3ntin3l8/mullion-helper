@@ -685,8 +685,17 @@ impl<R: Runtime> Supervisor<R> {
                         // completes: the freshly spawned child gets a full
                         // new streak budget, not zero, and this can't race
                         // the child's own exit (this is the same thread that
-                        // is about to call stop_child() below).
+                        // is about to call stop_child() below). Same
+                        // reasoning for the display counter -- without this,
+                        // the very first status after a just-triggered
+                        // restart would still show the pre-restart count
+                        // (already >= the frontend's escalation threshold),
+                        // reading as "still stuck" about the restart that
+                        // was just supposed to fix it.
                         *unhealthy_since = None;
+                        self.0
+                            .consecutive_connect_failures
+                            .store(0, Ordering::SeqCst);
                         true
                     } else {
                         false
@@ -1551,6 +1560,10 @@ mod tests {
         // threshold by the time this next connect_failed arrives.
         *supervisor.0.unhealthy_since.lock().unwrap() =
             Some(Instant::now() - SUSTAINED_FAILURE_RESTART_AFTER);
+        supervisor
+            .0
+            .consecutive_connect_failures
+            .store(9, Ordering::SeqCst);
 
         supervisor.handle_event(r#"{"type":"connect_failed","message":"still down"}"#);
 
@@ -1561,6 +1574,11 @@ mod tests {
         assert!(
             supervisor.0.unhealthy_since.lock().unwrap().is_none(),
             "the streak must re-arm after triggering a restart, not stay tripped"
+        );
+        assert_eq!(
+            supervisor.status().consecutive_connect_failures,
+            0,
+            "the freshly restarted child must not inherit the pre-restart escalated count"
         );
         let _ = fs::remove_dir_all(data_dir);
     }
