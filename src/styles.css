@@ -26,7 +26,7 @@ label.toggle { flex-direction: row; align-items: center; font-weight: 600; } .to
 .repair .payload-form { margin-top: 14px; }
 .unpair-row { margin-top: 14px; }
 .unpair-row .confirm { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; color: #7a2020; }
-.link.danger { color: #b03a3a; } button.danger { background: #d34b4b; } button.danger:hover { background: #b93f3f; }
+.link.danger { color: #b03a3a; } button.button-danger { background: #d34b4b; } button.button-danger:hover { background: #b93f3f; }
 .notice-error { margin: 16px 0; padding: 14px 16px; border-radius: 12px; background: #fbe9e9; border: 1px solid #f3c6c6; color: #7a2020; }
 .notice-error p { margin: 0; font-weight: 700; font-size: 13px; }
 .notice-error details { margin-top: 8px; }

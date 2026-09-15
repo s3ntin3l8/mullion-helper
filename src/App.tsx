@@ -162,7 +162,7 @@ export function App() {
       {!needsPairing && <div className="repair">
         <details><summary>Re-pair this computer</summary><div className="payload-form">{pairingForm}</div></details>
         <div className="unpair-row">{confirmingUnpair
-          ? <span className="confirm">Remove this computer's pairing?<button type="button" className="danger" disabled={busy} onClick={() => void unpair()}>Unpair</button><button type="button" className="link" disabled={busy} onClick={() => setConfirmingUnpair(false)}>Cancel</button></span>
+          ? <span className="confirm">Remove this computer's pairing?<button type="button" className="button-danger" disabled={busy} onClick={() => void unpair()}>Unpair</button><button type="button" className="link" disabled={busy} onClick={() => setConfirmingUnpair(false)}>Cancel</button></span>
           : <button type="button" className="link danger" onClick={() => setConfirmingUnpair(true)}>Unpair this computer</button>}</div>
       </div>}
     </section>}
