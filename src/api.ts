@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { getVersion } from "@tauri-apps/api/app";
+import { getVersion, getName } from "@tauri-apps/api/app";
 import type { BridgeStatus, Settings, UpdateResult } from "./types";
 
 const inTauri = "__TAURI_INTERNALS__" in window;
@@ -18,4 +18,9 @@ export const api = {
   installUpdate: () => invoke<void>("install_update"),
   diagnosticsPath: () => inTauri ? invoke<string>("diagnostics_path") : Promise.resolve(null),
   version: () => inTauri ? getVersion() : Promise.resolve(null),
+  // getName() returns package_info().name -- the same productName-derived
+  // value the Rust side reads for the log filename (see diagnostics_path).
+  // Falls back to the literal outside Tauri rather than null: this feeds
+  // a label, not a lookup path, so there's nothing to silently skip.
+  appName: () => inTauri ? getName() : Promise.resolve("Mullion Helper"),
 };

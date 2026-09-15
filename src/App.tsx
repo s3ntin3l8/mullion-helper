@@ -41,6 +41,7 @@ export function App() {
   const [diagnosticsPath, setDiagnosticsPath] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [version, setVersion] = useState<string | null>(null);
+  const [appName, setAppName] = useState("Mullion Helper");
   const refresh = useCallback(async () => {
     const [nextStatus, nextSettings] = await Promise.all([api.status(), api.settings()]);
     if (api.isDesktop) nextSettings.launch_at_login = await isEnabled();
@@ -61,6 +62,10 @@ export function App() {
 
   useEffect(() => {
     void api.version().then(setVersion).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    void api.appName().then(setAppName).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -174,7 +179,7 @@ export function App() {
             <summary>Show details</summary>
             <pre>{notice.details}</pre>
             <div className="notice-actions">
-              <button type="button" className="link" onClick={() => void copyDetails(`Mullion Helper ${version ?? "unknown version"}\n${notice.details ?? ""}`)}>{copied ? "Copied" : "Copy details"}</button>
+              <button type="button" className="link" onClick={() => void copyDetails(`${appName} ${version ?? "unknown version"}\n${notice.details ?? ""}`)}>{copied ? "Copied" : "Copy details"}</button>
               {diagnosticsPath && <span className="hint">Full log: {diagnosticsPath}</span>}
             </div>
           </details>}

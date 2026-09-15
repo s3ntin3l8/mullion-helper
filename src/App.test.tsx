@@ -28,6 +28,7 @@ const { mockApi } = vi.hoisted(() => {
       installUpdate: vi.fn(async (): Promise<void> => undefined),
       diagnosticsPath: vi.fn(async (): Promise<string | null> => null),
       version: vi.fn(async (): Promise<string | null> => "0.1.10"),
+      appName: vi.fn(async (): Promise<string> => "Mullion Helper"),
     },
   };
 });

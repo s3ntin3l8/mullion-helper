@@ -71,7 +71,14 @@ fn diagnostics_path(app: tauri::AppHandle) -> Result<String, String> {
         // opposite, incorrect assumption — read the same value the plugin
         // actually used instead of a second literal that can drift again.
         .map(|dir| {
-            dir.join(format!("{}.log", app.package_info().name))
+            // .with_extension, not format!("{}.log", ..): matches the
+            // plugin's own `dir.join(&file_name).with_extension("log")`
+            // exactly, including its "replace, don't append, past the last
+            // dot" behavior — identical for "Mullion Helper" today, but
+            // would silently diverge from what the plugin actually wrote
+            // if productName ever contained a dot.
+            dir.join(&app.package_info().name)
+                .with_extension("log")
                 .display()
                 .to_string()
         })
