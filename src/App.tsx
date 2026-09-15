@@ -6,6 +6,16 @@ import type { AgentCandidate, BridgeStatus, Notice, Settings } from "./types";
 
 const CUSTOM_PATH = "__custom__";
 
+// The worker's own internal reconnect ladder (RECONNECT_DELAYS_MS in
+// helper.mjs) tops out at its 30s rung after 5 attempts -- past that point
+// this is no longer "a blip, retrying", it's a sustained outage, and the
+// status card should look like one rather than staying the same amber it's
+// shown since the first retry a few seconds in. Purely a presentation
+// threshold — the supervisor's own sustained-failure restart
+// (SUSTAINED_FAILURE_RESTART_AFTER in supervisor.rs) is time-based and
+// independent of this.
+const RECONNECT_ESCALATION_THRESHOLD = 5;
+
 // `chosenPath` comes straight from the backend's `list_agent_sockets`
 // command, which computes it with the same `choose_best` `resolve_agent`
 // uses -- this only looks up that candidate's label for display, it never
@@ -180,6 +190,7 @@ export function App() {
   const connected = status?.state === "connected";
   const running = status && !["paused", "unpaired", "needs_pairing", "error"].includes(status.state);
   const needsPairing = status && ["unpaired", "needs_pairing"].includes(status.state);
+  const escalatedReconnect = status?.state === "reconnecting" && status.consecutive_connect_failures >= RECONNECT_ESCALATION_THRESHOLD;
   // A stored path outside the detected list (e.g. a headless setup, or a
   // candidate that just isn't reachable right now) must still render as
   // itself rather than silently reverting to "Auto-detect" -- so custom
@@ -200,8 +211,8 @@ export function App() {
   return <main className="shell">
     <header><BrandMark /><div><h1>Mullion Helper</h1><p>Your local SSH-agent bridge</p></div></header>
     <section className="status-card" aria-live="polite">
-      <span className={`orb ${status?.state ?? "starting"}`} />
-      <div className="status-copy"><strong>{status ? labels[status.state] : "Loading…"}</strong><span>{status?.detail ?? (connected ? "Your SSH agent is available to Mullion sessions." : "The tray icon keeps the bridge available in the background.")}</span>{status?.base_url && <small>{status.base_url}</small>}</div>
+      <span className={`orb ${status?.state ?? "starting"}${escalatedReconnect ? " escalated" : ""}`} />
+      <div className="status-copy"><strong>{status ? labels[status.state] : "Loading…"}</strong><span>{status?.detail ?? (connected ? "Your SSH agent is available to Mullion sessions." : "The tray icon keeps the bridge available in the background.")}</span>{status?.state === "reconnecting" && status.retry_in_ms != null && <small>Retrying in {Math.ceil(status.retry_in_ms / 1000)}s{escalatedReconnect ? " — this has been failing for a while" : ""}</small>}{status?.base_url && <small>{status.base_url}</small>}</div>
       {!needsPairing && (running ? <button className="secondary" disabled={busy} onClick={() => void act(api.pause)}>Pause</button> : <button disabled={busy} onClick={() => void act(api.start)}>Start</button>)}
     </section>
     {connected && status?.agent_identities === 0 && <p className="agent-warning">Your SSH agent is connected but has no identities loaded — unlock it, or check Settings → SSH agent socket.</p>}

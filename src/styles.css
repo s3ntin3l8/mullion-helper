@@ -12,6 +12,7 @@ header h1 { font-size: 20px; letter-spacing: -.02em; } header p { color: #66746c
 .status-card { display: flex; align-items: center; gap: 14px; padding: 20px; margin-bottom: 18px; }
 .orb { width: 12px; height: 12px; border-radius: 50%; background: #e49b32; box-shadow: 0 0 0 5px #f8ead5; flex: none; }
 .orb.connected { background: #0e9f6e; box-shadow: 0 0 0 5px #d9f4e9; } .orb.paused, .orb.unpaired { background: #819087; box-shadow: 0 0 0 5px #e6ebe8; } .orb.error, .orb.needs_pairing, .orb.agent_unavailable { background: #d34b4b; box-shadow: 0 0 0 5px #f8dddd; }
+.orb.reconnecting { background: #e49b32; box-shadow: 0 0 0 5px #f8ead5; } .orb.reconnecting.escalated { background: #d34b4b; box-shadow: 0 0 0 5px #f8dddd; }
 .status-copy { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 3px; } .status-copy strong { font-size: 16px; } .status-copy span, .status-copy small { color: #66746c; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .panel { padding: 24px; margin-top: 18px; } .panel h2 { font-size: 23px; margin: 3px 0 14px; } .panel p { color: #5e6c64; line-height: 1.55; margin-bottom: 18px; }
 .panel.onboarding { border-color: #b8e0c9; }

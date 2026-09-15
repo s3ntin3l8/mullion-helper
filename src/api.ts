@@ -3,7 +3,7 @@ import { getVersion, getName } from "@tauri-apps/api/app";
 import type { AgentSocketList, BridgeStatus, Settings, UpdateResult } from "./types";
 
 const inTauri = "__TAURI_INTERNALS__" in window;
-const demoStatus: BridgeStatus = { state: "unpaired", base_url: null, bridge_id: null, detail: null, retry_in_ms: null, updated_at: new Date().toISOString(), agent_identities: null };
+const demoStatus: BridgeStatus = { state: "unpaired", base_url: null, bridge_id: null, detail: null, retry_in_ms: null, updated_at: new Date().toISOString(), agent_identities: null, consecutive_connect_failures: 0 };
 
 export const api = {
   isDesktop: inTauri,

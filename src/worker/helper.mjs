@@ -191,6 +191,56 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// PR "instrument and auto-recover the reconnect loop" — before this, every
+// WebSocket-level failure (DNS, TCP refused/timeout, TLS verification, a
+// non-101 upgrade response) collapsed into the same fixed string,
+// "connection error", discarding the one piece of information (the actual
+// cause) that would have let a 4-hour outage be diagnosed in one log read
+// instead of by hand correlating system logs after the fact. Node's
+// WebSocket (undici-backed) attaches the real cause to the "error" event as
+// `event.error`, a Node system error carrying `.code` — sometimes one level
+// down via `.cause` (undici wraps some of its own connector errors). A
+// handshake that reaches the server and gets rejected with a non-101 status
+// (misrouted proxy, wrong path, a load balancer serving an HTML error page)
+// produces an error with NO such code at all — undici surfaces it as a
+// plain "unexpected server response" failure — which is exactly the other
+// branch below, and on its own is a materially different signal ("we
+// reached something, but it isn't this server") from every code'd case
+// ("we never reached anything").
+//
+// Deliberately does NOT echo the underlying error's free-form `.message`:
+// this flows into a persisted log file (Supervisor::handle_stderr) and the
+// "Copy details" button, so an unrecognized failure names only its `.code`
+// (or nothing, for the no-code case) rather than arbitrary text a
+// misbehaving or compromised server-adjacent component could shape.
+const WS_ERROR_CODE_PHRASES = {
+  ENOTFOUND: "could not resolve the server's hostname",
+  EAI_AGAIN: "temporary DNS resolution failure",
+  ECONNREFUSED: "connection refused by the server",
+  EHOSTUNREACH: "no route to the server",
+  ENETUNREACH: "network unreachable",
+  ETIMEDOUT: "connection attempt timed out",
+  ECONNRESET: "connection reset while connecting",
+  EPROTO: "TLS/protocol error while connecting",
+  DEPTH_ZERO_SELF_SIGNED_CERT:
+    "server certificate is self-signed — see Settings → Allow self-signed TLS certificates",
+  SELF_SIGNED_CERT_IN_CHAIN:
+    "server certificate chain includes a self-signed certificate — see Settings → Allow self-signed TLS certificates",
+  UNABLE_TO_VERIFY_LEAF_SIGNATURE:
+    "server certificate not trusted — see Settings → Allow self-signed TLS certificates",
+  ERR_TLS_CERT_ALTNAME_INVALID: "server certificate does not match the hostname",
+  CERT_HAS_EXPIRED: "server certificate has expired",
+};
+
+export function describeWsError(event) {
+  const code = event?.error?.code ?? event?.error?.cause?.code;
+  if (typeof code !== "string") {
+    return "server did not complete the WebSocket upgrade";
+  }
+  const phrase = WS_ERROR_CODE_PHRASES[code];
+  return phrase ? `${phrase} (${code})` : `connection error (${code})`;
+}
+
 /** Opens `ws`, sends `message` as the first (JSON, text) frame per
  * routes/agent-bridge.ts's ClientHandshake protocol, and resolves with the
  * server's `{type:"ready", ...}` reply — leaving `ws` open and undrained of
@@ -279,11 +329,11 @@ function handshake(ws, message) {
       resolve(parsed);
     }
 
-    function onError() {
+    function onError(event) {
       if (settled) return;
       settled = true;
       cleanup();
-      reject(new Error("connection error"));
+      reject(new Error(`connection error: ${describeWsError(event)}`));
     }
 
     function onClose() {
@@ -834,13 +884,19 @@ async function runRun(args, io) {
     // whether a concurrent renewal already moved credential.sessionId on
     // from under it (see renewalPromise's own comment above).
     const presentedSessionId = credential.sessionId;
+    // Hoisted out of the try block (toWsUrl below assigns it) so the catch
+    // block can still name the target that was actually attempted, even
+    // though the attempt failed -- otherwise "connect failed" carries no
+    // more information than "something, somewhere, didn't work".
+    let wsUrl;
     try {
       // Issue #1049 (Task 4) — same --insecure handling as runPair: when
       // set, attach INSECURE_DISPATCHER so a self-signed primary's WS
       // handshake can complete.
-      const { url: wsUrl, insecure } = toWsUrl(credential.baseUrl, "/ws/agent-bridge", {
+      const { url, insecure } = toWsUrl(credential.baseUrl, "/ws/agent-bridge", {
         insecure: flags.insecure,
       });
+      wsUrl = url;
       const ws = new WebSocket(wsUrl, insecure ? { dispatcher: INSECURE_DISPATCHER } : undefined);
       activeWs = ws;
       const ready = await handshake(ws, {
@@ -923,8 +979,8 @@ async function runRun(args, io) {
           return 1;
         }
       } else {
-        io.stderr.write(`connect failed: ${err.message}\n`);
-        emitEvent("connect_failed", { message: err.message });
+        io.stderr.write(`connect failed (${wsUrl ?? "unknown target"}): ${err.message}\n`);
+        emitEvent("connect_failed", { message: err.message, url: wsUrl ?? null });
       }
     }
     if (stopped) break;
