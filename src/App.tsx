@@ -40,6 +40,7 @@ export function App() {
   const [updateVersion, setUpdateVersion] = useState<string | null>(null);
   const [diagnosticsPath, setDiagnosticsPath] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [version, setVersion] = useState<string | null>(null);
   const refresh = useCallback(async () => {
     const [nextStatus, nextSettings] = await Promise.all([api.status(), api.settings()]);
     if (api.isDesktop) nextSettings.launch_at_login = await isEnabled();
@@ -56,6 +57,10 @@ export function App() {
 
   useEffect(() => {
     void api.diagnosticsPath().then(setDiagnosticsPath).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    void api.version().then(setVersion).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -169,12 +174,12 @@ export function App() {
             <summary>Show details</summary>
             <pre>{notice.details}</pre>
             <div className="notice-actions">
-              <button type="button" className="link" onClick={() => void copyDetails(notice.details ?? "")}>{copied ? "Copied" : "Copy details"}</button>
+              <button type="button" className="link" onClick={() => void copyDetails(`Mullion Helper ${version ?? "unknown version"}\n${notice.details ?? ""}`)}>{copied ? "Copied" : "Copy details"}</button>
               {diagnosticsPath && <span className="hint">Full log: {diagnosticsPath}</span>}
             </div>
           </details>}
         </section>
       : <p className="notice" role="status">{notice.summary}</p>)}
-    <footer><button className="link" disabled={busy} onClick={() => void checkUpdates()}>Check for updates</button><span>Closing this window keeps the tray app running.</span></footer>
+    <footer><span><button className="link" disabled={busy} onClick={() => void checkUpdates()}>Check for updates</button>{version && <span className="version"> · v{version}</span>}</span><span>Closing this window keeps the tray app running.</span></footer>
   </main>;
 }
