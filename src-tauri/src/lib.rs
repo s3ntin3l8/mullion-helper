@@ -305,6 +305,7 @@ pub fn run() {
 
             TrayIconBuilder::with_id(tray_status::TRAY_ID)
                 .icon(tray_status.initial_icon())
+                .icon_as_template(tray_status.initial_is_template())
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .tooltip("Mullion Helper — Ready to pair")
