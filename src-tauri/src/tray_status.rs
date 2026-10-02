@@ -23,6 +23,7 @@ const BASE_ICON: Image<'static> = tauri::include_image!("icons/tray-64.png");
 // quiet "inactive" state is a dimmed status tile rather than a grey one.
 const WHITE: [u8; 3] = [255, 255, 255];
 const INACTIVE_TEMPLATE_LEVEL: u8 = 77;
+const CONNECTED_TEMPLATE_LEVELS: [u8; 8] = [255; 8];
 // Attention is the one non-template macOS icon (a template can't be red), so
 // its neutral tiles need a colour readable on both light and dark menu bars.
 const ATTENTION_NEUTRAL: [u8; 3] = [128, 128, 128];
@@ -243,7 +244,7 @@ fn palette_frames(base: &Image<'_>, palette: Palette, macos: bool) -> (Vec<Vec<u
             let white = fill_rgb(base, WHITE);
             let white = Image::new(&white, base.width(), base.height());
             let levels = match palette {
-                Palette::Connected => [255; 8],
+                Palette::Connected => CONNECTED_TEMPLATE_LEVELS,
                 Palette::Transitional => PULSE_LEVELS,
                 _ => [INACTIVE_TEMPLATE_LEVEL; 8],
             };

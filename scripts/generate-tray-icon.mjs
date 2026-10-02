@@ -24,13 +24,21 @@ const attr = (tag, name) => {
 };
 const hex = (value) => [1, 3, 5].map((i) => parseInt(value.slice(i, i + 2), 16));
 
+const fillOf = (tag) => {
+  const fill = attr(tag, "fill");
+  if (!/^#[0-9a-fA-F]{6}$/.test(fill ?? "")) {
+    throw new Error(`${tag} needs a #rrggbb fill, got ${JSON.stringify(fill)}`);
+  }
+  return hex(fill);
+};
+
 const rects = [...svg.matchAll(/<rect\b[^>]*>/g)].map(([tag]) => ({
   x: Number(attr(tag, "x")) * scale,
   y: Number(attr(tag, "y")) * scale,
   w: Number(attr(tag, "width")) * scale,
   h: Number(attr(tag, "height")) * scale,
   r: Number(attr(tag, "rx") ?? 0) * scale,
-  color: hex(attr(tag, "fill")),
+  color: fillOf(tag),
 }));
 if (rects.length === 0) throw new Error("no <rect> tiles found in the SVG");
 
