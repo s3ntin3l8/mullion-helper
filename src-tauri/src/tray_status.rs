@@ -18,7 +18,21 @@ const COLORS: [[u8; 3]; 4] = [
     [211, 75, 75],   // action required
     [129, 144, 135], // inactive
 ];
-const BASE_ICON: Image<'static> = tauri::include_image!("icons/32x32.png");
+const BASE_ICON: Image<'static> = tauri::include_image!("icons/tray-64.png");
+// macOS template icons are tinted by the system, so only alpha matters. The
+// quiet "inactive" state is a dimmed status tile rather than a grey one.
+const WHITE: [u8; 3] = [255, 255, 255];
+const INACTIVE_TEMPLATE_LEVEL: u8 = 77;
+const CONNECTED_TEMPLATE_LEVELS: [u8; 8] = [255; 8];
+// Attention is the one non-template macOS icon (a template can't be red), so
+// its neutral tiles need a colour readable on both light and dark menu bars.
+const ATTENTION_NEUTRAL: [u8; 3] = [128, 128, 128];
+const PALETTES: [Palette; 4] = [
+    Palette::Connected,
+    Palette::Transitional,
+    Palette::Attention,
+    Palette::Inactive,
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Palette {
@@ -81,6 +95,7 @@ struct Inner<R: Runtime> {
     animation: Mutex<Option<JoinHandle<()>>>,
     blocking_shutdown: Mutex<()>,
     frames: Vec<Vec<Vec<u8>>>,
+    template: Vec<bool>,
 }
 
 pub struct TrayStatus<R: Runtime = Wry>(Arc<Inner<R>>);
@@ -93,15 +108,10 @@ impl<R: Runtime> Clone for TrayStatus<R> {
 
 impl<R: Runtime> TrayStatus<R> {
     pub fn new(app: AppHandle<R>, status_item: MenuItem<R>, status: &BridgeStatus) -> Self {
-        let frames = COLORS
+        let (frames, template): (Vec<_>, Vec<_>) = PALETTES
             .iter()
-            .map(|color| {
-                PULSE_LEVELS
-                    .iter()
-                    .map(|level| recolor_status_tile(&BASE_ICON, *color, *level))
-                    .collect()
-            })
-            .collect();
+            .map(|palette| palette_frames(&BASE_ICON, *palette, cfg!(target_os = "macos")))
+            .unzip();
         let presentation = Presentation::for_state(&status.state);
         let tray_status = Self(Arc::new(Inner {
             app,
@@ -111,6 +121,7 @@ impl<R: Runtime> TrayStatus<R> {
             animation: Mutex::new(None),
             blocking_shutdown: Mutex::new(()),
             frames,
+            template,
         }));
         tray_status.update(status);
         tray_status
@@ -145,7 +156,12 @@ impl<R: Runtime> TrayStatus<R> {
     }
 
     pub fn initial_icon(&self) -> Image<'_> {
-        self.icon(0)
+        self.icon(self.palette(), 0)
+    }
+
+    /// Whether the initial icon is a macOS template image.
+    pub fn initial_is_template(&self) -> bool {
+        self.0.template[self.palette()]
     }
 
     pub fn shutdown(&self) {
@@ -177,21 +193,73 @@ impl<R: Runtime> TrayStatus<R> {
         let mut frame = 0;
         while !self.0.shutdown.load(Ordering::SeqCst) {
             if let Some(tray) = self.0.app.tray_by_id(TRAY_ID) {
-                let _ = tray.set_icon(Some(self.icon(frame)));
+                // Palette is read once so the icon and its template flag
+                // can't disagree; set atomically to avoid a flicker on macOS.
+                let palette = self.palette();
+                let _ = tray.set_icon_with_as_template(
+                    Some(self.icon(palette, frame)),
+                    self.0.template[palette],
+                );
             }
             frame = (frame + 1) % PULSE_LEVELS.len();
             thread::sleep(PULSE_INTERVAL);
         }
     }
 
-    fn icon(&self, frame: usize) -> Image<'_> {
-        let palette = self.0.palette.load(Ordering::SeqCst) as usize;
+    fn palette(&self) -> usize {
+        self.0.palette.load(Ordering::SeqCst) as usize
+    }
+
+    fn icon(&self, palette: usize, frame: usize) -> Image<'_> {
         Image::new(
             &self.0.frames[palette][frame],
             BASE_ICON.width(),
             BASE_ICON.height(),
         )
     }
+}
+
+/// Pre-renders the pulse frames for `palette` and whether they are a macOS
+/// template image. Off macOS, and for Attention on macOS, the status tile is
+/// coloured; every other macOS state is a white-on-alpha template whose status
+/// is carried by the tile's opacity alone.
+fn palette_frames(base: &Image<'_>, palette: Palette, macos: bool) -> (Vec<Vec<u8>>, bool) {
+    let frames = |image: &Image<'_>, color: [u8; 3], levels: [u8; 8]| {
+        levels
+            .iter()
+            .map(|level| recolor_status_tile(image, color, *level))
+            .collect()
+    };
+    let color = COLORS[palette as usize];
+    if !macos {
+        return (frames(base, color, PULSE_LEVELS), false);
+    }
+    match palette {
+        Palette::Attention => {
+            let grey = fill_rgb(base, ATTENTION_NEUTRAL);
+            let grey = Image::new(&grey, base.width(), base.height());
+            (frames(&grey, color, PULSE_LEVELS), false)
+        }
+        _ => {
+            let white = fill_rgb(base, WHITE);
+            let white = Image::new(&white, base.width(), base.height());
+            let levels = match palette {
+                Palette::Connected => CONNECTED_TEMPLATE_LEVELS,
+                Palette::Transitional => PULSE_LEVELS,
+                _ => [INACTIVE_TEMPLATE_LEVEL; 8],
+            };
+            (frames(&white, WHITE, levels), true)
+        }
+    }
+}
+
+/// Replaces the colour of every pixel, keeping its alpha.
+fn fill_rgb(base: &Image<'_>, color: [u8; 3]) -> Vec<u8> {
+    let mut pixels = base.rgba().to_vec();
+    for offset in (0..pixels.len()).step_by(4) {
+        pixels[offset..offset + 3].copy_from_slice(&color);
+    }
+    pixels
 }
 
 fn recolor_status_tile(base: &Image<'_>, color: [u8; 3], opacity: u8) -> Vec<u8> {
@@ -292,6 +360,84 @@ mod tests {
         assert!(frames
             .iter()
             .all(|frame| frame[..3] == COLORS[Palette::Connected as usize]));
+    }
+
+    fn checker() -> Image<'static> {
+        // 2x2: three opaque tiles and a half-transparent lower-right one.
+        Image::new(
+            &[1, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 128],
+            2,
+            2,
+        )
+    }
+
+    #[test]
+    fn macos_template_frames_are_white_with_alpha_preserved_outside_the_status_tile() {
+        let base = checker();
+        for palette in [Palette::Connected, Palette::Transitional, Palette::Inactive] {
+            let (frames, template) = palette_frames(&base, palette, true);
+            assert!(template);
+            assert_eq!(frames.len(), PULSE_LEVELS.len());
+            for frame in &frames {
+                for offset in (0..frame.len()).step_by(4) {
+                    assert_eq!(frame[offset..offset + 3], WHITE);
+                }
+                assert_eq!(
+                    frame.iter().skip(3).step_by(4).take(3).collect::<Vec<_>>(),
+                    [&255, &255, &255]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn macos_template_status_is_carried_by_the_status_tile_alpha() {
+        let base = checker();
+        let tile_alpha = |palette| -> Vec<u8> {
+            palette_frames(&base, palette, true)
+                .0
+                .iter()
+                .map(|frame| frame[15])
+                .collect()
+        };
+
+        assert_eq!(tile_alpha(Palette::Connected), [128; 8]);
+        assert!(tile_alpha(Palette::Transitional)
+            .windows(2)
+            .any(|pair| pair[0] != pair[1]));
+        assert!(tile_alpha(Palette::Inactive)
+            .iter()
+            .all(|alpha| *alpha < 128 && *alpha == tile_alpha(Palette::Inactive)[0]));
+    }
+
+    #[test]
+    fn macos_attention_is_a_coloured_non_template_with_readable_neutral_tiles() {
+        let (frames, template) = palette_frames(&checker(), Palette::Attention, true);
+
+        assert!(!template);
+        assert_eq!(frames.len(), PULSE_LEVELS.len());
+        for frame in &frames {
+            assert_eq!(frame[..3], ATTENTION_NEUTRAL);
+            assert_eq!(frame[12..15], COLORS[Palette::Attention as usize]);
+        }
+    }
+
+    #[test]
+    fn other_platforms_keep_the_coloured_icon_for_every_palette() {
+        let base = checker();
+        for palette in PALETTES {
+            let (frames, template) = palette_frames(&base, palette, false);
+            assert!(!template);
+            assert_eq!(&frames[0][..12], &base.rgba()[..12]);
+            assert_eq!(frames[0][12..15], COLORS[palette as usize]);
+        }
+    }
+
+    #[test]
+    fn palettes_are_listed_in_discriminant_order() {
+        for (index, palette) in PALETTES.iter().enumerate() {
+            assert_eq!(*palette as usize, index);
+        }
     }
 
     #[test]
