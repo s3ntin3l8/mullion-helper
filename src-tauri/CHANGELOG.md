@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.14](https://github.com/s3ntin3l8/mullion-helper/compare/v0.1.13...v0.1.14) (2026-10-03)
+
+
+### Bug Fixes
+
+* align npm plugin-updater with the tauri-plugin-updater crate ([#66](https://github.com/s3ntin3l8/mullion-helper/issues/66)) ([c8c1397](https://github.com/s3ntin3l8/mullion-helper/commit/c8c13977db1251bbc61a144bda58f77771a3a064))
+
 ## [0.1.13](https://github.com/s3ntin3l8/mullion-helper/compare/v0.1.12...v0.1.13) (2026-10-03)
 
 
