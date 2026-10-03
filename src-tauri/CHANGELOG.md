@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.13](https://github.com/s3ntin3l8/mullion-helper/compare/v0.1.12...v0.1.13) (2026-10-03)
+
+
+### Features
+
+* use a macOS template tray icon ([#61](https://github.com/s3ntin3l8/mullion-helper/issues/61)) ([167b51d](https://github.com/s3ntin3l8/mullion-helper/commit/167b51d8aad6e9f42923376a18182098607073c9))
+
 ## [0.1.12](https://github.com/s3ntin3l8/mullion-helper/compare/v0.1.11...v0.1.12) (2026-09-15)
 
 
