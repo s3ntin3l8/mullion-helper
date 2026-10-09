@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.15](https://github.com/s3ntin3l8/mullion-helper/compare/v0.1.14...v0.1.15) (2026-10-09)
+
+
+### Performance Improvements
+
+* release the settings webview in tray mode ([#72](https://github.com/s3ntin3l8/mullion-helper/issues/72)) ([ad99701](https://github.com/s3ntin3l8/mullion-helper/commit/ad99701d0c2fc31a59267e18caff2d58ab0f01c1))
+
 ## [0.1.14](https://github.com/s3ntin3l8/mullion-helper/compare/v0.1.13...v0.1.14) (2026-10-03)
 
 
