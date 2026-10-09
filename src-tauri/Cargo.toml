@@ -23,6 +23,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
+tokio = { version = "1", features = ["sync", "time", "macros"] }
 
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }
+tokio = { version = "1", features = ["rt", "test-util"] }

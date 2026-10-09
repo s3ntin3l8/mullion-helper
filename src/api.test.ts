@@ -81,3 +81,25 @@ describe("api.appName", () => {
     expect(getNameMock).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("native lifecycle and cached updates", () => {
+  it("loads cached availability and passes the operation token and outcome to Rust", async () => {
+    (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
+    invokeMock.mockResolvedValueOnce({ available: true, version: "9.0.0" }).mockResolvedValueOnce(42);
+    const { api } = await import("./api");
+    await expect(api.updateStatus()).resolves.toEqual({ available: true, version: "9.0.0" });
+    await expect(api.beginUiOperation()).resolves.toBe(42);
+    await api.endUiOperation(42, false);
+    expect(invokeMock.mock.calls).toEqual([
+      ["get_update_status"], ["begin_ui_operation"], ["end_ui_operation", { operation: 42, success: false }],
+    ]);
+  });
+
+  it("keeps browser previews independent of native lifecycle commands", async () => {
+    const { api } = await import("./api");
+    await expect(api.updateStatus()).resolves.toEqual({ available: false, version: null });
+    const operation = await api.beginUiOperation();
+    await api.endUiOperation(operation, true);
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+});

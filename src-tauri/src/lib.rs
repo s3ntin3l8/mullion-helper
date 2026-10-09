@@ -1,9 +1,11 @@
 mod headless_process;
+mod main_window;
 mod migration;
 mod supervisor;
 mod tray_status;
+mod updates;
 
-use serde::Serialize;
+use main_window::MainWindow;
 use supervisor::{AgentSocketList, BridgeStatus, Settings, Supervisor};
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
@@ -14,6 +16,7 @@ use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_updater::UpdaterExt;
+use updates::{UpdateResult, Updates};
 
 #[tauri::command]
 fn bridge_status(supervisor: tauri::State<'_, Supervisor>) -> BridgeStatus {
@@ -90,24 +93,32 @@ fn diagnostics_path(app: tauri::AppHandle) -> Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
-#[derive(Serialize)]
-struct UpdateResult {
-    available: bool,
-    version: Option<String>,
+#[tauri::command]
+fn get_update_status(updates: tauri::State<'_, Updates>) -> UpdateResult {
+    updates.status()
 }
 
 #[tauri::command]
-async fn check_for_updates(app: tauri::AppHandle) -> Result<UpdateResult, String> {
-    let update = updater_builder(&app)
-        .build()
-        .map_err(|error| error.to_string())?
-        .check()
-        .await
-        .map_err(|error| error.to_string())?;
-    Ok(UpdateResult {
-        available: update.is_some(),
-        version: update.map(|value| value.version),
-    })
+async fn check_for_updates(
+    app: tauri::AppHandle,
+    updates: tauri::State<'_, Updates>,
+) -> Result<UpdateResult, String> {
+    updates.check(&app).await
+}
+
+#[tauri::command]
+fn begin_ui_operation(lifecycle: tauri::State<'_, MainWindow>) -> Result<u32, String> {
+    lifecycle.begin_operation()
+}
+
+#[tauri::command]
+fn end_ui_operation(
+    app: tauri::AppHandle,
+    lifecycle: tauri::State<'_, MainWindow>,
+    operation: u32,
+    success: bool,
+) {
+    lifecycle.end_operation(&app, operation, success);
 }
 
 #[tauri::command]
@@ -132,6 +143,8 @@ fn updater_builder(app: &tauri::AppHandle) -> tauri_plugin_updater::UpdaterBuild
     {
         let app = app.clone();
         return builder.on_before_exit(move || {
+            app.state::<MainWindow>().shutdown();
+            app.state::<Updates>().shutdown();
             if let Some(tray_status) = app.try_state::<tray_status::TrayStatus>() {
                 tray_status.shutdown_for_update();
             }
@@ -146,40 +159,16 @@ fn updater_builder(app: &tauri::AppHandle) -> tauri_plugin_updater::UpdaterBuild
 }
 
 fn show_main(app: &tauri::AppHandle) {
-    // Confirmed in the field (PR #45's follow-up): merely *leaving* the
-    // policy at Accessory while calling window.set_focus() is not enough —
-    // focusing a window still implicitly promotes the app's Dock presence
-    // at the AppKit level, and that promotion does not revert on its own
-    // once the window is later hidden, so the Dock icon gets stuck showing
-    // indefinitely until the user manually removes it. This is a known
-    // Tauri/AppKit interaction with no clean "stay Accessory but still let
-    // the window focus normally" fix — see the community-documented
-    // workaround at https://github.com/tauri-apps/tauri/discussions/10774.
-    // Embrace it instead of fighting it: explicitly go Regular for the
-    // period the window is actually visible (a transient Dock icon while
-    // the window is open is expected, normal behavior for a menu-bar-style
-    // app — the same thing 1Password and similar tray utilities do), and
-    // explicitly revert to Accessory in the close handler below, rather
-    // than relying on an implicit revert that has proven not to happen.
-    if let Some(window) = app.get_webview_window("main") {
-        // Inside the if-let, not before it: if there's no window to show
-        // (not yet created, or mid-teardown), there is also no
-        // CloseRequested event coming to revert this — flipping to Regular
-        // unconditionally could leave the app stuck there with nothing to
-        // undo it.
-        #[cfg(target_os = "macos")]
-        if let Err(error) = app.set_activation_policy(tauri::ActivationPolicy::Regular) {
-            log::warn!("could not switch to the Regular activation policy: {error}");
-        }
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
+    if let Some(lifecycle) = app.try_state::<MainWindow>() {
+        lifecycle.open(app);
     }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default()
+        .manage(MainWindow::default())
+        .manage(Updates::default())
         // First in the chain: this is the app's only logging facility, and
         // registering it early means every plugin/setup step after this one
         // can log through it too.
@@ -225,22 +214,20 @@ pub fn run() {
             unpair_bridge,
             diagnostics_path,
             check_for_updates,
+            get_update_status,
+            begin_ui_operation,
+            end_ui_operation,
             install_update
         ])
         .on_window_event(|window, event| {
+            if window.label() != "main" {
+                return;
+            }
+            let app = window.app_handle();
+            let lifecycle = app.state::<MainWindow>();
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                let _ = window.hide();
-                // Undo show_main()'s explicit Regular switch (see the
-                // comment there) — this is the revert that plain Accessory
-                // policy alone was observed not to perform on its own.
-                #[cfg(target_os = "macos")]
-                if let Err(error) = window
-                    .app_handle()
-                    .set_activation_policy(tauri::ActivationPolicy::Accessory)
-                {
-                    log::warn!("could not switch back to the Accessory activation policy: {error}");
-                }
+                lifecycle.close(app);
             }
         })
         .setup(|app| {
@@ -365,6 +352,7 @@ pub fn run() {
             tray_status.update(&initial_status);
             tray_status.launch();
             supervisor.launch();
+            app.state::<Updates>().launch(app.handle());
             if should_start {
                 supervisor.start();
             }
@@ -379,13 +367,30 @@ pub fn run() {
         .expect("error while building Mullion Helper");
 
     builder.run(|app, event| {
-        if matches!(event, RunEvent::Exit | RunEvent::ExitRequested { .. }) {
-            if let Some(tray_status) = app.try_state::<tray_status::TrayStatus>() {
-                tray_status.shutdown();
+        match event {
+            // Tauri removes the destroyed window from its manager before
+            // delivering RunEvent, so a queued reopen can safely reuse main.
+            RunEvent::WindowEvent {
+                label,
+                event: WindowEvent::Destroyed,
+                ..
+            } if label == "main" => {
+                app.state::<MainWindow>().on_destroyed(app);
             }
-            if let Some(supervisor) = app.try_state::<Supervisor>() {
-                supervisor.shutdown();
+            RunEvent::ExitRequested { code, api, .. } if main_window::keep_running(code) => {
+                api.prevent_exit();
             }
+            RunEvent::Exit | RunEvent::ExitRequested { .. } => {
+                app.state::<MainWindow>().shutdown();
+                app.state::<Updates>().shutdown();
+                if let Some(tray_status) = app.try_state::<tray_status::TrayStatus>() {
+                    tray_status.shutdown();
+                }
+                if let Some(supervisor) = app.try_state::<Supervisor>() {
+                    supervisor.shutdown();
+                }
+            }
+            _ => {}
         }
     });
 }
