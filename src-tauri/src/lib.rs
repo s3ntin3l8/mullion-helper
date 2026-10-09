@@ -223,9 +223,9 @@ pub fn run() {
             if window.label() != "main" {
                 return;
             }
-            let app = window.app_handle();
-            let lifecycle = app.state::<MainWindow>();
             if let WindowEvent::CloseRequested { api, .. } = event {
+                let app = window.app_handle();
+                let lifecycle = app.state::<MainWindow>();
                 api.prevent_close();
                 lifecycle.close(app);
             }
