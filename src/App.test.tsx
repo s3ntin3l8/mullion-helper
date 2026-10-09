@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import type { AgentSocketList, BridgeStatus, Settings } from "./types";
 
@@ -26,6 +26,9 @@ const { mockApi } = vi.hoisted(() => {
       pause: vi.fn(async (): Promise<BridgeStatus> => unpairedStatus),
       saveSettings: vi.fn(async (settings: Settings): Promise<Settings> => settings),
       checkForUpdates: vi.fn(async () => ({ available: false, version: null as string | null })),
+      updateStatus: vi.fn(async () => ({ available: false, version: null as string | null })),
+      beginUiOperation: vi.fn(async () => 1),
+      endUiOperation: vi.fn(async () => {}),
       installUpdate: vi.fn(async (): Promise<void> => undefined),
       diagnosticsPath: vi.fn(async (): Promise<string | null> => null),
       version: vi.fn(async (): Promise<string | null> => "0.1.10"),
@@ -36,6 +39,18 @@ const { mockApi } = vi.hoisted(() => {
 
 vi.mock("./api", () => ({ api: mockApi }));
 
+vi.mock("@tauri-apps/plugin-autostart", () => ({
+  isEnabled: vi.fn(async () => false),
+  enable: vi.fn(async () => {}),
+  disable: vi.fn(async () => {}),
+}));
+vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
+
+afterEach(() => {
+  mockApi.isDesktop = false;
+  vi.clearAllMocks();
+});
+
 const connectedStatus: BridgeStatus = { state: "connected", base_url: "https://mullion.example", bridge_id: "bridge-123", detail: null, retry_in_ms: null, updated_at: new Date().toISOString(), agent_identities: null, consecutive_connect_failures: 0 };
 const unpairedStatus: BridgeStatus = { state: "unpaired", base_url: null, bridge_id: null, detail: null, retry_in_ms: null, updated_at: new Date().toISOString(), agent_identities: null, consecutive_connect_failures: 0 };
 
@@ -44,7 +59,7 @@ describe("Mullion Helper window", () => {
     const { container } = render(<App />);
     expect(await screen.findByText("Connect this computer")).toBeVisible();
     expect(screen.getByRole("button", { name: "Pair and start" })).toBeDisabled();
-    expect(screen.getByText("Closing this window keeps the tray app running.")).toBeVisible();
+    expect(screen.getByText("Closing discards unsaved entries; the bridge keeps running.")).toBeVisible();
     expect(container.querySelector("header svg.brand-mark")).toBeInTheDocument();
     expect(container.querySelector("header img")).not.toBeInTheDocument();
   });
@@ -215,5 +230,81 @@ describe("Mullion Helper window", () => {
     await screen.findByText("Retrying in 1s");
     expect(screen.queryByText(/this has been failing for a while/)).not.toBeInTheDocument();
     expect(container.querySelector(".orb.reconnecting.escalated")).not.toBeInTheDocument();
+  });
+
+  it("shows cached update availability on reopening without initiating a check", async () => {
+    mockApi.updateStatus.mockResolvedValueOnce({ available: true, version: "9.0.0" });
+    render(<App />);
+    expect(await screen.findByText("Mullion Helper 9.0.0 is available")).toBeVisible();
+    expect(mockApi.checkForUpdates).not.toHaveBeenCalled();
+  });
+
+  it("keeps pairing guarded through autostart and the settings refresh", async () => {
+    const { enable } = await import("@tauri-apps/plugin-autostart");
+    let complete!: () => void;
+    vi.mocked(enable).mockImplementationOnce(() => new Promise<void>((resolve) => { complete = resolve; }));
+    mockApi.isDesktop = true;
+    mockApi.pair.mockResolvedValueOnce(connectedStatus);
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Connect this computer");
+    await user.type(screen.getByPlaceholderText("Paste pairing payload"), "payload");
+    await user.click(screen.getByRole("button", { name: "Pair and start" }));
+    await waitFor(() => expect(enable).toHaveBeenCalledOnce());
+    expect(mockApi.beginUiOperation).toHaveBeenCalledOnce();
+    expect(mockApi.endUiOperation).not.toHaveBeenCalled();
+    expect(mockApi.settings).toHaveBeenCalledOnce();
+    complete();
+    await waitFor(() => expect(mockApi.endUiOperation).toHaveBeenCalledWith(1, true));
+    expect(mockApi.settings).toHaveBeenCalledTimes(2);
+  });
+
+  it("releases the guard as failed and shows an error when pairing fails", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Connect this computer");
+    await user.type(screen.getByPlaceholderText("Paste pairing payload"), "payload");
+    await user.click(screen.getByRole("button", { name: "Pair and start" }));
+    await screen.findByRole("alert");
+    await waitFor(() => expect(mockApi.endUiOperation).toHaveBeenCalledWith(1, false));
+    expect(screen.getByRole("button", { name: "Pair and start" })).toBeEnabled();
+  });
+
+  it("does not start a workflow if the window is already closing", async () => {
+    mockApi.beginUiOperation.mockRejectedValueOnce("The window is closing.");
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Connect this computer");
+    await user.type(screen.getByPlaceholderText("Paste pairing payload"), "payload");
+    await user.click(screen.getByRole("button", { name: "Pair and start" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("The window is closing.");
+    expect(mockApi.pair).not.toHaveBeenCalled();
+    expect(mockApi.endUiOperation).not.toHaveBeenCalled();
+  });
+
+  it("guards saving settings and manual update checks", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Connect this computer");
+    await screen.findByRole("button", { name: "Save settings" });
+    await user.click(screen.getByRole("button", { name: "Save settings" }));
+    await waitFor(() => expect(mockApi.endUiOperation).toHaveBeenCalledWith(1, true));
+    expect(mockApi.saveSettings).toHaveBeenCalledOnce();
+    mockApi.endUiOperation.mockClear();
+    await user.click(screen.getByRole("button", { name: "Check for updates" }));
+    expect(await screen.findByText("Mullion Helper is up to date.")).toBeVisible();
+    await waitFor(() => expect(mockApi.endUiOperation).toHaveBeenCalledWith(1, true));
+  });
+
+  it("keeps update installation errors visible and re-enables the controls", async () => {
+    mockApi.updateStatus.mockResolvedValueOnce({ available: true, version: "9.0.0" });
+    mockApi.installUpdate.mockRejectedValueOnce("Download failed");
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Mullion Helper 9.0.0 is available");
+    await user.click(screen.getByRole("button", { name: "Install update" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Download failed");
+    await waitFor(() => expect(mockApi.endUiOperation).toHaveBeenCalledWith(1, false));
+    expect(screen.getByRole("button", { name: "Install update" })).toBeEnabled();
   });
 });

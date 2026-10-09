@@ -11,6 +11,7 @@
     "windows": [
       {
         "label": "main",
+        "create": false,
         "title": "Mullion Helper",
         "width": 680,
         "height": 760,

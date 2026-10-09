@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { api } from "./api";
-import type { AgentCandidate, BridgeStatus, Notice, Settings } from "./types";
+import { subscribeWithSnapshot } from "./subscriptions";
+import type { AgentCandidate, BridgeStatus, Notice, Settings, UpdateResult } from "./types";
 
 const CUSTOM_PATH = "__custom__";
 
@@ -75,24 +76,39 @@ export function App() {
   const [agentCandidates, setAgentCandidates] = useState<AgentCandidate[]>([]);
   const [autoDetectChosenPath, setAutoDetectChosenPath] = useState<string | null>(null);
   const [manualCustomSocket, setManualCustomSocket] = useState(false);
+  const statusRevision = useRef(0);
   const loadAgentCandidates = useCallback(async () => {
     const result = await api.listAgentSockets();
     setAgentCandidates(result.candidates);
     setAutoDetectChosenPath(result.chosen);
   }, []);
-  const refresh = useCallback(async () => {
-    const [nextStatus, nextSettings] = await Promise.all([api.status(), api.settings()]);
+  const readSettings = useCallback(async () => {
+    const nextSettings = await api.settings();
     if (api.isDesktop) nextSettings.launch_at_login = await isEnabled();
-    setStatus(nextStatus); setSettings(nextSettings);
+    return nextSettings;
+  }, []);
+  const refresh = useCallback(async () => {
+    const before = statusRevision.current;
+    const [nextStatus, nextSettings] = await Promise.all([api.status(), readSettings()]);
+    setSettings(nextSettings);
+    if (before === statusRevision.current) setStatus(nextStatus);
+  }, [readSettings]);
+
+  useEffect(() => {
+    return subscribeWithSnapshot<BridgeStatus>(
+      (receive) => api.isDesktop ? listen<BridgeStatus>("bridge-status", (event) => receive(event.payload)) : Promise.resolve(() => {}),
+      api.status,
+      (value) => { statusRevision.current++; setStatus(value); },
+      (error) => setNotice(errorNotice(String(error))),
+    );
   }, []);
 
   useEffect(() => {
-    void refresh().catch((error: unknown) => setNotice(errorNotice(String(error))));
-    if (!api.isDesktop) return;
-    let unlisten = () => {};
-    void listen<BridgeStatus>("bridge-status", (event) => setStatus(event.payload)).then((fn) => { unlisten = fn; });
-    return () => unlisten();
-  }, [refresh]);
+    let cancelled = false;
+    void readSettings().then((value) => { if (!cancelled) setSettings(value); })
+      .catch((error: unknown) => { if (!cancelled) setNotice(errorNotice(String(error))); });
+    return () => { cancelled = true; };
+  }, [readSettings]);
 
   useEffect(() => {
     void api.diagnosticsPath().then(setDiagnosticsPath).catch(() => {});
@@ -111,13 +127,12 @@ export function App() {
   }, [loadAgentCandidates]);
 
   useEffect(() => {
-    if (!api.isDesktop) return;
-    const check = () => void api.checkForUpdates().then((result) => {
-      if (result.available) setUpdateVersion(result.version);
-    }).catch(() => {});
-    const initial = window.setTimeout(check, 3000);
-    const daily = window.setInterval(check, 24 * 60 * 60 * 1000);
-    return () => { window.clearTimeout(initial); window.clearInterval(daily); };
+    return subscribeWithSnapshot<UpdateResult>(
+      (receive) => api.isDesktop ? listen<UpdateResult>("update-status", (event) => receive(event.payload)) : Promise.resolve(() => {}),
+      api.updateStatus,
+      (result) => setUpdateVersion(result.available ? result.version : null),
+      () => {},
+    );
   }, []);
 
   async function copyDetails(text: string) {
@@ -127,10 +142,30 @@ export function App() {
       window.setTimeout(() => setCopied(false), 1500);
     } catch { /* clipboard unavailable; the text is still selectable in the details block */ }
   }
-  async function act(operation: () => Promise<BridgeStatus>) {
+  async function perform(operation: () => Promise<void>) {
     setBusy(true); setNotice(null);
-    try { setStatus(await operation()); } catch (error) { setNotice(errorNotice(String(error))); }
-    finally { setBusy(false); }
+    let guard: number | undefined;
+    let success = false;
+    try {
+      guard = await api.beginUiOperation();
+      await operation();
+      success = true;
+    } catch (error) {
+      setNotice(errorNotice(String(error)));
+    } finally {
+      if (guard !== undefined) {
+        try { await api.endUiOperation(guard, success); }
+        catch (error) { setNotice(errorNotice(String(error))); }
+      }
+      setBusy(false);
+    }
+  }
+  async function act(operation: () => Promise<BridgeStatus>) {
+    await perform(async () => {
+      const before = statusRevision.current;
+      const result = await operation();
+      if (before === statusRevision.current) setStatus(result);
+    });
   }
   async function pair() {
     await act(async () => {
@@ -167,8 +202,7 @@ export function App() {
   }
   async function save() {
     if (!settings) return;
-    setBusy(true); setNotice(null);
-    try {
+    await perform(async () => {
       if (api.isDesktop) {
         if (settings.launch_at_login) await enable(); else await disable();
       }
@@ -176,15 +210,14 @@ export function App() {
       // While unpaired there's no running worker for save_settings to
       // restart -- saying so anyway would be actively wrong, not just vague.
       setNotice(infoNotice(needsPairing ? "Settings saved." : "Settings saved. The bridge was restarted with the new configuration."));
-    } catch (error) { setNotice(errorNotice(String(error))); } finally { setBusy(false); }
+    });
   }
   async function checkUpdates() {
-    setBusy(true);
-    try {
+    await perform(async () => {
       const result = await api.checkForUpdates();
       setUpdateVersion(result.available ? result.version : null);
       setNotice(infoNotice(result.available ? `Version ${result.version} is available.` : "Mullion Helper is up to date."));
-    } catch (error) { setNotice(errorNotice(String(error))); } finally { setBusy(false); }
+    });
   }
 
   const connected = status?.state === "connected";
@@ -248,7 +281,7 @@ export function App() {
           : <button type="button" className="link danger" onClick={() => setConfirmingUnpair(true)}>Unpair this computer</button>}</div>
       </div>}
     </section>}
-    {updateVersion && <section className="update"><div><strong>Mullion Helper {updateVersion} is available</strong><span>The app will restart after installing.</span></div><button disabled={busy} onClick={() => { setBusy(true); void api.installUpdate().catch((error) => { setNotice(errorNotice(String(error))); setBusy(false); }); }}>Install update</button></section>}
+    {updateVersion && <section className="update"><div><strong>Mullion Helper {updateVersion} is available</strong><span>The app will restart after installing.</span></div><button disabled={busy} onClick={() => void perform(api.installUpdate)}>Install update</button></section>}
     {notice && (notice.kind === "error"
       ? <section className="notice notice-error" role="alert">
           <p>{notice.summary}</p>
@@ -262,6 +295,6 @@ export function App() {
           </details>}
         </section>
       : <p className="notice" role="status">{notice.summary}</p>)}
-    <footer><span><button className="link" disabled={busy} onClick={() => void checkUpdates()}>Check for updates</button>{version && <span className="version"> · v{version}</span>}</span><span>Closing this window keeps the tray app running.</span></footer>
+    <footer><span><button className="link" disabled={busy} onClick={() => void checkUpdates()}>Check for updates</button>{version && <span className="version"> · v{version}</span>}</span><span>Closing discards unsaved entries; the bridge keeps running.</span></footer>
   </main>;
 }

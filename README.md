@@ -2,7 +2,14 @@
 
 Desktop tray app for the [Mullion SSH-agent bridge](https://github.com/s3ntin3l8/mullion-session-manager/blob/main/docs/ssh-agent.md).
 While its tray icon is present it supervises a private bridge worker. Closing
-the window hides it; **Quit** stops both the worker and app.
+the window releases its webview and discards unsaved entries; **Quit** stops
+both the worker and app. Reopening loads saved settings and current bridge
+status. Closing during an operation waits for completion; failures keep the
+window open so you can read the error.
+
+On Linux, Tauri retains the WebKit context to reuse its network process after
+the window closes. Memory loaded by the first opening may therefore remain
+resident; window teardown does not guarantee a return to the startup footprint.
 
 Generated from [`tauri-app-template`](https://github.com/s3ntin3l8/tauri-app-template) —
 see that repo for the underlying tooling conventions (CI, blueprints, pre-commit).
@@ -52,9 +59,11 @@ name. It is an implementation detail, not a supported CLI or download.
 
 ## Updates and migration
 
-The app checks for signed whole-app updates after startup and every 24 hours;
-manual checking is always available. Credentials stay outside the webview in
-the app data directory with owner-only permissions.
+Background startup does not create a settings webview. The native app checks
+for signed whole-app updates after startup and every 24 hours, even while the
+window is closed; reopening shows any available update. Manual checking and
+installation are always available in the window. Credentials stay outside the
+webview in the app data directory with owner-only permissions.
 
 First launch imports a valid credential from the legacy `mullion helper`
 location. Only after the bundled worker validates the copy does the app
