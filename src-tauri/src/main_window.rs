@@ -92,6 +92,13 @@ impl Lifecycle {
         self.pending_close = false;
         std::mem::take(&mut self.reopen) && !self.shutting_down
     }
+
+    fn destroy_failed(&mut self, generation: u32) {
+        if self.generation == generation && self.phase == Phase::Destroying {
+            self.phase = Phase::Open;
+            self.reopen = false;
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -201,20 +208,20 @@ impl MainWindow {
     }
 
     fn destroy(&self, app: &AppHandle) {
-        let app = app.clone();
-        let lifecycle = self.clone();
-        std::thread::spawn(move || {
-            if let Some(window) = app.get_webview_window("main") {
-                if let Err(error) = window.destroy() {
-                    let mut state = lifecycle.0.lock().expect("window mutex poisoned");
-                    state.phase = Phase::Open;
-                    state.reopen = false;
-                    log::warn!("could not destroy the main window: {error}");
-                }
-            } else {
-                lifecycle.on_destroyed(&app);
+        let generation = self.0.lock().expect("window mutex poisoned").generation;
+        // destroy() already dispatches through Tauri's event-loop proxy.
+        // Capture this exact window now: a worker's later lookup by label
+        // could target a replacement after an unexpected native destruction.
+        // Only the actual Destroyed event may reset the lifecycle.
+        if let Some(window) = app.get_webview_window("main") {
+            if let Err(error) = window.destroy() {
+                self.0
+                    .lock()
+                    .expect("window mutex poisoned")
+                    .destroy_failed(generation);
+                log::warn!("could not destroy the main window: {error}");
             }
-        });
+        }
     }
 
     pub fn on_destroyed(&self, app: &AppHandle) {
@@ -334,6 +341,28 @@ mod tests {
         assert!(!state.end_operation(old, true));
         assert_eq!(state.operation, Some(current));
         assert!(state.end_operation(current, true));
+    }
+
+    #[test]
+    fn destruction_failure_only_restores_the_window_that_requested_it() {
+        let mut state = Lifecycle::default();
+        assert!(state.request_open());
+        assert!(state.finish_creation(state.generation));
+        let old = state.generation;
+        assert!(state.request_close());
+        state.destroy_failed(old);
+        assert_eq!(state.phase, Phase::Open);
+        assert!(state.request_close());
+        state.destroyed();
+        state.destroy_failed(old);
+        assert_eq!(state.phase, Phase::Absent);
+        assert!(state.request_open());
+        state.destroy_failed(old);
+        assert_eq!(state.phase, Phase::Creating);
+        assert!(state.finish_creation(state.generation));
+        assert!(state.request_close());
+        state.destroy_failed(old);
+        assert_eq!(state.phase, Phase::Destroying);
     }
 
     #[test]
