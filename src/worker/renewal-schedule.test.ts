@@ -22,6 +22,15 @@ describe("computeRenewAt", () => {
     expect(computeRenewAt("", now)).toBe(now);
   });
 
+  it("renews right away when the expiry is unparseable, never producing a NaN deadline", () => {
+    const now = 1_000_000;
+    for (const bad of ["not-a-date", "x", "2026-13-45T99:99:99Z"]) {
+      const renewAt = computeRenewAt(bad, now);
+      expect(Number.isFinite(renewAt)).toBe(true);
+      expect(isRenewalDue(renewAt, now)).toBe(true);
+    }
+  });
+
   it("floors an already-expired or near-expiry credential to a one-second delay", () => {
     const now = Date.parse("2026-10-16T00:00:00Z");
     expect(computeRenewAt(new Date(now - HOUR).toISOString(), now)).toBe(

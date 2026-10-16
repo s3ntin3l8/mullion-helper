@@ -23,7 +23,13 @@ export function computeRenewAt(
   fraction = RENEW_AT_FRACTION,
 ) {
   if (!expiresAt) return now;
-  const ttlMs = new Date(expiresAt).getTime() - now;
+  // An unparseable expiry (the auth reply's expires_at is not validated)
+  // must not become a NaN deadline, which would never compare as due and
+  // silently disable renewal. Treat it like a missing one: renew now, which
+  // re-persists a valid expiry from the server's reply.
+  const expiresMs = Date.parse(expiresAt);
+  if (!Number.isFinite(expiresMs)) return now;
+  const ttlMs = expiresMs - now;
   return now + Math.max(ttlMs * fraction, MIN_RENEW_DELAY_MS);
 }
 

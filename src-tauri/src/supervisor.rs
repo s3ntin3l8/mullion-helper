@@ -309,6 +309,15 @@ impl<R: Runtime> Supervisor<R> {
         }
         self.0.desired.store(false, Ordering::SeqCst);
         self.stop_child();
+        // A fresh pairing starts a fresh streak. The previous worker's
+        // failures (the ones that ended in NeedsPairing) left
+        // `unhealthy_since` set, and pause()/save_settings() are the only
+        // other places that clear it -- so without this the new worker's
+        // very first reconnect event would measure its "unhealthy for over
+        // N seconds" against the dead credential's old failures and
+        // immediately kill the worker that was just started. Done up front, next to
+        // the stop, so the Starting status below doesn't inherit the old count.
+        self.reset_failure_tracking();
         let settings = self.settings();
         let mut command = self.worker_command();
         command.args(["pair", "--payload-stdin", "--json"]);
@@ -345,14 +354,6 @@ impl<R: Runtime> Supervisor<R> {
             .and_then(Value::as_str)
             .map(str::to_owned);
         self.set_status(status);
-        // A fresh pairing starts a fresh streak. The previous worker's
-        // failures (the ones that ended in NeedsPairing) left
-        // `unhealthy_since` set, and pause()/save_settings() are the only
-        // other places that clear it -- so without this the new worker's
-        // very first reconnect event would measure its "unhealthy for over
-        // N seconds" against the dead credential's old failures and
-        // immediately kill the worker that was just started.
-        self.reset_failure_tracking();
         self.0.desired.store(true, Ordering::SeqCst);
         Ok(self.status())
     }
