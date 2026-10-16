@@ -11,6 +11,7 @@
 //     SSH_AUTH_SOCK and pipes the two together.
 //   - `inspect` / `version` — machine-readable metadata for the supervisor.
 
+import { computeRenewAt, isRenewalDue, RENEW_CHECK_INTERVAL_MS } from "./renewal-schedule.mjs";
 import net from "node:net";
 import fs from "node:fs";
 import os from "node:os";
@@ -77,7 +78,6 @@ const HANDSHAKE_TIMEOUT_MS = 10_000;
 // agent host's MULLION_AGENT_TOKEN does (bridge-registry.ts's own comment
 // on rotateBridgeSession), so a transient renewal failure must keep trying
 // rather than surface as a fatal error.
-const RENEW_AT_FRACTION = 0.5;
 const RENEW_TIMEOUT_MS = 10_000;
 const RENEW_RETRY_DELAYS_MS = [5000, 15000, 60000, 300000];
 
@@ -719,7 +719,9 @@ async function runRun(args, io) {
   }
 
   let stopped = false;
-  let renewTimer = null;
+  let renewTimer = null; // pending retry after a failed renewal
+  let renewCheckTimer = null; // wall-clock poll, see renewal-schedule.mjs
+  let renewAt = Infinity;
   // Tracks whichever WebSocket the connect loop below currently has open
   // (or is mid-handshake on) — renewSession's rejection branch uses this to
   // force a prompt shutdown (see there for why a rejected renewal can't
@@ -735,6 +737,7 @@ async function runRun(args, io) {
   io.onInterrupt?.(() => {
     stopped = true;
     if (renewTimer) clearTimeout(renewTimer);
+    if (renewCheckTimer) clearInterval(renewCheckTimer);
     // Same reasoning as the renewal-rejection branch below: `stopped` alone
     // doesn't unblock a loop iteration currently parked on
     // `await new Promise((resolve) => mux.onClose(resolve))` — nothing else
@@ -765,22 +768,27 @@ async function runRun(args, io) {
 
   function scheduleRenewal() {
     if (renewTimer) clearTimeout(renewTimer);
+    renewTimer = null;
     if (stopped) return;
-    if (!credential.expiresAt) {
-      // Defensive only — by the time this is first called (right after a
-      // successful "auth", which always carries expires_at per routes/
-      // agent-bridge.ts) there should always be a value. Renew right away
-      // rather than guess a TTL if this is somehow reached anyway.
-      renewTimer = setTimeout(() => void startRenewal(), 0);
-      return;
+    // computeRenewAt treats a missing expiresAt as "due now" (defensive only
+    // — by the time this is first called, right after a successful "auth",
+    // there should always be a value), picked up immediately below.
+    renewAt = computeRenewAt(credential.expiresAt);
+    if (!renewCheckTimer) {
+      renewCheckTimer = setInterval(checkRenewal, RENEW_CHECK_INTERVAL_MS);
+      renewCheckTimer.unref?.();
     }
-    const ttlMs = new Date(credential.expiresAt).getTime() - Date.now();
-    // Floored, same reasoning as agent-enrollment.ts's own scheduleRenewal:
-    // a clock skew or an already-near-expiry credential (e.g. right after
-    // loading an old file) must not produce a negative/near-zero delay that
-    // busy-loops.
-    const renewInMs = Math.max(ttlMs * RENEW_AT_FRACTION, 1_000);
-    renewTimer = setTimeout(() => void startRenewal(), renewInMs);
+    checkRenewal();
+  }
+
+  // Polled on a wall-clock interval (and after every successful handshake)
+  // rather than armed as one long setTimeout: see renewal-schedule.mjs for
+  // why a single monotonic timer misses its deadline across a laptop sleep.
+  // Skips while a renewal is in flight or a failure retry is already pending
+  // so the poll never doubles up on either.
+  function checkRenewal() {
+    if (stopped || renewalPromise || renewTimer) return;
+    if (isRenewalDue(renewAt)) startRenewal();
   }
 
   // renewSession() never throws (its own try/catch handles every failure
@@ -879,7 +887,10 @@ async function runRun(args, io) {
       renewAttempt++;
       io.stderr.write(`session renewal attempt failed (${err.message}) — retrying in ${delay}ms\n`);
       emitEvent("renewal_retry", { delay_ms: delay, message: err.message });
-      renewTimer = setTimeout(() => void renewSession(), delay);
+      renewTimer = setTimeout(() => {
+        renewTimer = null;
+        startRenewal();
+      }, delay);
     }
   }
 
@@ -950,13 +961,22 @@ async function runRun(args, io) {
       // agent-bridge.ts) — sync it in case it drifted from what's on disk
       // (e.g. this file was copied from a machine paired earlier), and use
       // it as the one-time seed for the renewal timer below.
-      if (ready.expires_at && ready.expires_at !== credential.expiresAt) {
+      const expiresAtChanged = Boolean(ready.expires_at) && ready.expires_at !== credential.expiresAt;
+      if (expiresAtChanged) {
         credential = { ...credential, expiresAt: ready.expires_at };
         saveCredential(io, credential);
       }
       if (!renewalArmed) {
         renewalArmed = true;
         scheduleRenewal();
+      } else if (expiresAtChanged) {
+        // The primary slid the expiry forward on this reconnect — re-derive
+        // the renewal deadline from the new, authoritative value.
+        scheduleRenewal();
+      } else {
+        // Reconnecting after a sleep: a renewal that came due while the
+        // machine was asleep shouldn't wait for the next poll.
+        checkRenewal();
       }
 
       const mux = attachInboundMux(ws, {
@@ -1001,6 +1021,7 @@ async function runRun(args, io) {
           );
           emitEvent("dead_credential", { message: err.message });
           clearTimeout(renewTimer);
+          clearInterval(renewCheckTimer);
           return 1;
         }
       } else {
@@ -1022,6 +1043,7 @@ async function runRun(args, io) {
     await sleep(delay);
   }
   clearTimeout(renewTimer);
+  clearInterval(renewCheckTimer);
   return renewalRejected ? 1 : 0;
 }
 
