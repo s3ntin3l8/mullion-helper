@@ -28,6 +28,7 @@ jobs:
     outputs:
       has_release: ${{ steps.release.outputs.has_release }}
       tag_name: ${{ steps.release.outputs.tag_name }}
+      release_id: ${{ steps.release.outputs.release_id }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -55,8 +56,16 @@ jobs:
             echo "has_release=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if ! is_draft="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)"; then
+          if ! release_meta="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft,databaseId)"; then
             echo "Release $tag does not exist or could not be read" >&2
+            exit 1
+          fi
+          is_draft="$(jq -r .isDraft <<< "$release_meta")"
+          release_id="$(jq -r .databaseId <<< "$release_meta")"
+          # tauri-action turns a non-numeric releaseId into NaN and silently
+          # skips every upload (exit 0), so fail here instead.
+          if ! [[ "$release_id" =~ ^[0-9]+$ ]]; then
+            echo "Release $tag has no numeric database id (got '$release_id')" >&2
             exit 1
           fi
           if [[ "$is_draft" != "false" ]]; then
@@ -69,6 +78,7 @@ jobs:
           fi
           echo "has_release=true" >> "$GITHUB_OUTPUT"
           echo "tag_name=$tag" >> "$GITHUB_OUTPUT"
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
 
   build-installers:
     name: Build ${{ matrix.label }} installer
@@ -113,7 +123,11 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ needs.resolve-release.outputs.tag_name }}
+          # releaseId, not tagName: with tagName tauri-action v1 rewrites the
+          # name and body of an existing release, blanking Release Please's notes.
+          # getOrCreateRelease only runs when tagName is set without releaseId
+          # (checked at tauri-action@v1 1deb371b); re-check on a major bump.
+          releaseId: ${{ needs.resolve-release.outputs.release_id }}
           args: --bundles ${{ matrix.bundles }}
           updaterJsonPreferNsis: true
       # This is the artifact users actually install, and the one that
