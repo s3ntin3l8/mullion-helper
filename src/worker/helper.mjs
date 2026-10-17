@@ -961,7 +961,13 @@ async function runRun(args, io) {
       // agent-bridge.ts) — sync it in case it drifted from what's on disk
       // (e.g. this file was copied from a machine paired earlier), and use
       // it as the one-time seed for the renewal timer below.
-      const expiresAtChanged = Boolean(ready.expires_at) && ready.expires_at !== credential.expiresAt;
+      // Gated like runPair and loadCredential: an unparseable expires_at must
+      // not be persisted, or the next loadCredential returns null and forces
+      // a re-pair.
+      const expiresAtChanged =
+        Boolean(ready.expires_at) &&
+        isValidExpiresAt(ready.expires_at) &&
+        ready.expires_at !== credential.expiresAt;
       if (expiresAtChanged) {
         credential = { ...credential, expiresAt: ready.expires_at };
         saveCredential(io, credential);
