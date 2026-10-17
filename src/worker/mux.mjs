@@ -67,7 +67,11 @@ const DEFAULT_MAX_CHANNELS = 256;
 // frame at all means the socket is half-open (laptop sleep, NAT drop, a
 // wedged proxy): the OS never reports a close, so without this read-idle
 // timer the connection would sit "connected" forever.
-export const DEFAULT_IDLE_TIMEOUT_MS = 45_000;
+// Deliberately NOT an exact multiple of the ping interval: the timer re-arms
+// off every inbound frame, so 3 x 15s would put the deadline exactly on the
+// third ping's arrival and let millisecond jitter close a healthy idle
+// connection. 50s (~3.3 intervals) keeps a clear margin; don't "round" it.
+export const DEFAULT_IDLE_TIMEOUT_MS = 50_000;
 
 export function encodeHeader(type, channelId) {
   const buf = Buffer.allocUnsafe(HEADER_BYTES);
@@ -228,7 +232,7 @@ class InboundChannel {
  * connection down if this side ever stops answering). Returns a handle with
  * `close()` (tears down every open channel + the socket) and `onClose(cb)`
  * (fires once, when the socket closes for any reason).
- * `opts.idleTimeoutMs` (default 45s) closes the connection when no inbound
+ * `opts.idleTimeoutMs` (default 50s) closes the connection when no inbound
  * message of any kind arrives for that long.
  */
 export function attachInboundMux(ws, opts) {
@@ -322,7 +326,6 @@ export function attachInboundMux(ws, opts) {
 
   ws.addEventListener("close", teardown);
   ws.addEventListener("error", teardown);
-  armIdleTimer();
 
   const handle = {
     onClose(listener) {
@@ -339,6 +342,7 @@ export function attachInboundMux(ws, opts) {
       teardown();
     },
   };
+  armIdleTimer();
   return handle;
 }
 

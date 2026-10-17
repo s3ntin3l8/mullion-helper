@@ -73,11 +73,11 @@ describe("read-idle timeout", () => {
     expect(closed).toBe(1);
   });
 
-  it("defaults to 45s", () => {
+  it("defaults to 50s (not a multiple of the 15s ping interval)", () => {
     vi.useFakeTimers();
     const { socket } = fakeSocket();
     attachInboundMux(socket, { onChannel() {} });
-    vi.advanceTimersByTime(44_999);
+    vi.advanceTimersByTime(49_999);
     expect(socket.closeCalls).toBe(0);
     vi.advanceTimersByTime(1);
     expect(socket.closeCalls).toBe(1);
