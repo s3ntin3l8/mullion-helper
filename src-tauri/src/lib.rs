@@ -57,8 +57,11 @@ fn list_agent_sockets() -> AgentSocketList {
 }
 
 #[tauri::command]
-fn start_bridge(supervisor: tauri::State<'_, Supervisor>) -> BridgeStatus {
-    supervisor.start()
+async fn start_bridge(supervisor: tauri::State<'_, Supervisor>) -> Result<BridgeStatus, String> {
+    // start() itself is instant, but it takes the supervisor's op lock and so
+    // can wait behind an in-flight pair().
+    let supervisor = supervisor.inner().clone();
+    run_blocking(move || Ok(supervisor.start())).await
 }
 
 #[tauri::command]
@@ -330,9 +333,12 @@ pub fn run() {
                     "open" => show_main(app),
                     "toggle" => {
                         let supervisor = app.state::<Supervisor>();
+                        // start()/pause() may wait on the op lock behind an
+                        // in-flight pair(); keep that off the main thread.
                         match supervisor.status().state {
                             supervisor::BridgeState::Paused => {
-                                supervisor.start();
+                                let supervisor = supervisor.inner().clone();
+                                tauri::async_runtime::spawn_blocking(move || supervisor.start());
                             }
                             // Nothing to pause/resume before pairing exists
                             // — falling through to pause() here would flip
@@ -347,7 +353,8 @@ pub fn run() {
                                 show_main(app);
                             }
                             _ => {
-                                supervisor.pause();
+                                let supervisor = supervisor.inner().clone();
+                                tauri::async_runtime::spawn_blocking(move || supervisor.pause());
                             }
                         }
                     }

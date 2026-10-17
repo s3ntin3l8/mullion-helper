@@ -173,6 +173,12 @@ struct Inner<R: Runtime> {
     child: Mutex<Option<Child>>,
     thread: Mutex<Option<JoinHandle<()>>>,
     blocking_shutdown: Mutex<()>,
+    // Held for the whole body of start/pause/pair/unpair/save_settings so
+    // those multi-step sequences can't interleave with one another (they
+    // run on the blocking pool, and the tray menu is a second entry point).
+    // Never taken by run_loop or the event handlers, so a long pair() only
+    // delays other user-initiated operations, not status reporting.
+    op_lock: Mutex<()>,
     status: Mutex<BridgeStatus>,
     settings: Mutex<Settings>,
     connected_at: Mutex<Option<Instant>>,
@@ -209,6 +215,7 @@ impl<R: Runtime> Supervisor<R> {
             child: Mutex::new(None),
             thread: Mutex::new(None),
             blocking_shutdown: Mutex::new(()),
+            op_lock: Mutex::new(()),
             status: Mutex::new(BridgeStatus::new(BridgeState::Unpaired, None)),
             settings: Mutex::new(settings),
             connected_at: Mutex::new(None),
@@ -244,7 +251,13 @@ impl<R: Runtime> Supervisor<R> {
             .clone()
     }
 
+    fn lock_op(&self) -> std::sync::MutexGuard<'_, ()> {
+        // The guarded data is `()`, so a poisoned lock carries no bad state.
+        self.0.op_lock.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     pub fn save_settings(&self, settings: Settings) -> Result<Settings, String> {
+        let _op = self.lock_op();
         write_json_atomic(&self.0.data_dir.join("settings.json"), &settings)?;
         *self
             .0
@@ -259,12 +272,14 @@ impl<R: Runtime> Supervisor<R> {
     }
 
     pub fn start(&self) -> BridgeStatus {
+        let _op = self.lock_op();
         self.0.desired.store(true, Ordering::SeqCst);
         self.set_status(BridgeStatus::new(BridgeState::Starting, None));
         self.status()
     }
 
     pub fn pause(&self) -> BridgeStatus {
+        let _op = self.lock_op();
         self.0.desired.store(false, Ordering::SeqCst);
         self.stop_child();
         // No agent is in active use while paused -- don't let set_status go
@@ -307,6 +322,7 @@ impl<R: Runtime> Supervisor<R> {
         if payload.trim().is_empty() || payload.len() > 8192 {
             return Err("The pairing payload is empty or too large.".into());
         }
+        let _op = self.lock_op();
         self.0.desired.store(false, Ordering::SeqCst);
         self.stop_child();
         // A fresh pairing starts a fresh streak. The previous worker's
@@ -372,6 +388,7 @@ impl<R: Runtime> Supervisor<R> {
     /// write site, shared by `pair` and session renewal — so deleting it is
     /// a complete, not partial, unpair.
     pub fn unpair(&self) -> Result<BridgeStatus, String> {
+        let _op = self.lock_op();
         self.0.desired.store(false, Ordering::SeqCst);
         self.stop_child();
         *self
@@ -1336,6 +1353,27 @@ mod tests {
 
         assert!(!status.success());
         assert!(child.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn user_operations_are_serialized_by_the_op_lock() {
+        let app = tauri::test::mock_app();
+        let data_dir = test_data_dir("op-lock");
+        let supervisor = Supervisor::new(app.handle().clone(), data_dir.clone()).unwrap();
+        let guard = supervisor.lock_op();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let other = supervisor.clone();
+        let handle = std::thread::spawn(move || {
+            other.pause();
+            tx.send(()).unwrap();
+        });
+        // pause() must wait for the held lock...
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+        drop(guard);
+        // ...and complete once it is released.
+        rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        handle.join().unwrap();
+        let _ = fs::remove_dir_all(data_dir);
     }
 
     #[test]
