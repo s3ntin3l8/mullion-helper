@@ -62,6 +62,12 @@ jobs:
           fi
           is_draft="$(jq -r .isDraft <<< "$release_meta")"
           release_id="$(jq -r .databaseId <<< "$release_meta")"
+          # tauri-action turns a non-numeric releaseId into NaN and silently
+          # skips every upload (exit 0), so fail here instead.
+          if ! [[ "$release_id" =~ ^[0-9]+$ ]]; then
+            echo "Release $tag has no numeric database id (got '$release_id')" >&2
+            exit 1
+          fi
           if [[ "$is_draft" != "false" ]]; then
             echo "Release $tag is not published" >&2
             exit 1
@@ -119,6 +125,8 @@ jobs:
         with:
           # releaseId, not tagName: with tagName tauri-action v1 rewrites the
           # name and body of an existing release, blanking Release Please's notes.
+          # getOrCreateRelease only runs when tagName is set without releaseId
+          # (checked at tauri-action@v1 1deb371b); re-check on a major bump.
           releaseId: ${{ needs.resolve-release.outputs.release_id }}
           args: --bundles ${{ matrix.bundles }}
           updaterJsonPreferNsis: true
