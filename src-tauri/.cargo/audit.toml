@@ -1,0 +1,11 @@
+# cargo-audit configuration (the shared ci-tauri.yml runs `cargo audit` in
+# this directory). Everything not listed here is still enforced.
+#
+# zip 4.6.1 -- RUSTSEC-2026-0367 / -0368 / -0369 (SUID/SGID preservation and
+# symlink escapes during ZIP extraction), fixed only in zip >= 9.0.0. zip is
+# pulled in by tauri-plugin-updater, whose newest release still requires
+# zip ^4, so there is no upgrade path yet. The helper only extracts update
+# bundles after the updater has verified their signature. Remove these entries
+# as soon as tauri-plugin-updater allows zip >= 9: https://github.com/s3ntin3l8/mullion-helper/issues/80
+[advisories]
+ignore = ["RUSTSEC-2026-0367", "RUSTSEC-2026-0368", "RUSTSEC-2026-0369"]

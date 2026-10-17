@@ -309,6 +309,15 @@ impl<R: Runtime> Supervisor<R> {
         }
         self.0.desired.store(false, Ordering::SeqCst);
         self.stop_child();
+        // A fresh pairing starts a fresh streak. The previous worker's
+        // failures (the ones that ended in NeedsPairing) left
+        // `unhealthy_since` set, and pause()/save_settings() are the only
+        // other places that clear it -- so without this the new worker's
+        // very first reconnect event would measure its "unhealthy for over
+        // N seconds" against the dead credential's old failures and
+        // immediately kill the worker that was just started. Done up front, next to
+        // the stop, so the Starting status below doesn't inherit the old count.
+        self.reset_failure_tracking();
         let settings = self.settings();
         let mut command = self.worker_command();
         command.args(["pair", "--payload-stdin", "--json"]);
@@ -599,6 +608,17 @@ impl<R: Runtime> Supervisor<R> {
         // the process itself, so no *new* events can be produced after
         // that point, only already-buffered ones drained late.)
         if !self.0.desired.load(Ordering::SeqCst) {
+            // Logged by event type only (never the line, which can carry
+            // server messages): a "connected" dropped here is otherwise
+            // indistinguishable from one that was never emitted.
+            let event_type = serde_json::from_str::<Value>(line)
+                .ok()
+                .and_then(|event| event["type"].as_str().map(str::to_owned));
+            if let Some(event_type) = event_type {
+                log::info!(
+                    "ignoring worker event {event_type}: supervisor is not running the bridge"
+                );
+            }
             return;
         }
         let Ok(event) = serde_json::from_str::<Value>(line) else {
@@ -803,6 +823,11 @@ impl<R: Runtime> Supervisor<R> {
     }
 
     fn set_status(&self, mut status: BridgeStatus) {
+        // State name only -- `detail` can carry server-supplied text. This
+        // is the one place every UI/tray status flows through, so a status
+        // that never showed up (or was overwritten) is traceable from the
+        // log alone.
+        log::info!("bridge status -> {:?}", status.state);
         status.agent_identities = *self
             .0
             .agent_identities
