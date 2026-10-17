@@ -62,6 +62,13 @@ const WINDOW_ADJUST_THRESHOLD_BYTES = CHANNEL_WINDOW_BYTES / 2;
 // reason those do.
 const DEFAULT_MAX_CHANNELS = 256;
 
+// Issue #77 — the primary pings every 15s (PING_INTERVAL_MS in
+// src/services/ssh-agent-mux.ts), so three missed intervals with no inbound
+// frame at all means the socket is half-open (laptop sleep, NAT drop, a
+// wedged proxy): the OS never reports a close, so without this read-idle
+// timer the connection would sit "connected" forever.
+export const DEFAULT_IDLE_TIMEOUT_MS = 45_000;
+
 export function encodeHeader(type, channelId) {
   const buf = Buffer.allocUnsafe(HEADER_BYTES);
   buf.writeUInt8(type, 0);
@@ -221,11 +228,26 @@ class InboundChannel {
  * connection down if this side ever stops answering). Returns a handle with
  * `close()` (tears down every open channel + the socket) and `onClose(cb)`
  * (fires once, when the socket closes for any reason).
+ * `opts.idleTimeoutMs` (default 45s) closes the connection when no inbound
+ * message of any kind arrives for that long.
  */
 export function attachInboundMux(ws, opts) {
   const channels = new Map();
   const closeListeners = [];
   let closed = false;
+  const idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
+  let idleTimer = null;
+
+  function armIdleTimer() {
+    if (idleTimer !== null) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      idleTimer = null;
+      // handle.close() runs teardown() synchronously, so onClose fires even
+      // if the half-open socket's own close event never arrives.
+      handle.close();
+    }, idleTimeoutMs);
+    idleTimer.unref?.();
+  }
 
   ws.binaryType = "arraybuffer";
 
@@ -241,12 +263,15 @@ export function attachInboundMux(ws, opts) {
   function teardown() {
     if (closed) return;
     closed = true;
+    if (idleTimer !== null) clearTimeout(idleTimer);
+    idleTimer = null;
     for (const channel of channels.values()) channel.closeLocally();
     channels.clear();
     for (const listener of closeListeners) invokeListener(listener);
   }
 
   ws.addEventListener("message", (event) => {
+    armIdleTimer();
     if (typeof event.data === "string") return; // binary-only protocol
     const frame = decodeFrame(Buffer.from(event.data));
     if (frame === null) return;
@@ -297,13 +322,16 @@ export function attachInboundMux(ws, opts) {
 
   ws.addEventListener("close", teardown);
   ws.addEventListener("error", teardown);
+  armIdleTimer();
 
-  return {
+  const handle = {
     onClose(listener) {
       closeListeners.push(listener);
     },
     close() {
       if (closed) return;
+      if (idleTimer !== null) clearTimeout(idleTimer);
+      idleTimer = null;
       for (const channel of channels.values()) channel.close();
       if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
         ws.close();
@@ -311,6 +339,7 @@ export function attachInboundMux(ws, opts) {
       teardown();
     },
   };
+  return handle;
 }
 
 /**
