@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.1.15](https://github.com/s3ntin3l8/mullion-helper/compare/v0.1.14...v0.1.15) (2026-10-17)
+
+
+### Bug Fixes
+
+* persist a renewal reply after stop and detect half-open sockets ([#83](https://github.com/s3ntin3l8/mullion-helper/issues/83)) ([d603b48](https://github.com/s3ntin3l8/mullion-helper/commit/d603b48539557d860b321d8aa7dc10bc72582401))
+* renew the bridge session on wall-clock time and reset failure tracking on pair ([#79](https://github.com/s3ntin3l8/mullion-helper/issues/79)) ([2f05284](https://github.com/s3ntin3l8/mullion-helper/commit/2f0528455940c48c215e3e9fdd51b0f42ab97ae1))
+* run blocking bridge commands off the main thread ([#84](https://github.com/s3ntin3l8/mullion-helper/issues/84)) ([73ab797](https://github.com/s3ntin3l8/mullion-helper/commit/73ab79795014e703db409fe3ae9d2f4138874203))
+
+
+### Performance Improvements
+
+* release the settings webview in tray mode ([#72](https://github.com/s3ntin3l8/mullion-helper/issues/72)) ([ad99701](https://github.com/s3ntin3l8/mullion-helper/commit/ad99701d0c2fc31a59267e18caff2d58ab0f01c1))
+
 ## [0.1.14](https://github.com/s3ntin3l8/mullion-helper/compare/v0.1.13...v0.1.14) (2026-10-03)
 
 
