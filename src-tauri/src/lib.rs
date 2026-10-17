@@ -28,12 +28,27 @@ fn get_settings(supervisor: tauri::State<'_, Supervisor>) -> Settings {
     supervisor.settings()
 }
 
+/// Runs a blocking `Supervisor` call on the blocking thread pool. Tauri runs
+/// sync commands on the main thread, so anything that can wait on a child
+/// process (pairing's network round trip, `stop_child`) must go through here
+/// or the tray menu and webview freeze for the duration.
+async fn run_blocking<T, F>(work: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|error| error.to_string())?
+}
+
 #[tauri::command]
-fn save_settings(
+async fn save_settings(
     settings: Settings,
     supervisor: tauri::State<'_, Supervisor>,
 ) -> Result<Settings, String> {
-    supervisor.save_settings(settings)
+    let supervisor = supervisor.inner().clone();
+    run_blocking(move || supervisor.save_settings(settings)).await
 }
 
 #[tauri::command]
@@ -42,26 +57,32 @@ fn list_agent_sockets() -> AgentSocketList {
 }
 
 #[tauri::command]
-fn start_bridge(supervisor: tauri::State<'_, Supervisor>) -> BridgeStatus {
-    supervisor.start()
+async fn start_bridge(supervisor: tauri::State<'_, Supervisor>) -> Result<BridgeStatus, String> {
+    // start() itself is instant, but it takes the supervisor's op lock and so
+    // can wait behind an in-flight pair().
+    let supervisor = supervisor.inner().clone();
+    run_blocking(move || Ok(supervisor.start())).await
 }
 
 #[tauri::command]
-fn pause_bridge(supervisor: tauri::State<'_, Supervisor>) -> BridgeStatus {
-    supervisor.pause()
+async fn pause_bridge(supervisor: tauri::State<'_, Supervisor>) -> Result<BridgeStatus, String> {
+    let supervisor = supervisor.inner().clone();
+    run_blocking(move || Ok(supervisor.pause())).await
 }
 
 #[tauri::command]
-fn pair_bridge(
+async fn pair_bridge(
     payload: String,
     supervisor: tauri::State<'_, Supervisor>,
 ) -> Result<BridgeStatus, String> {
-    supervisor.pair(&payload)
+    let supervisor = supervisor.inner().clone();
+    run_blocking(move || supervisor.pair(&payload)).await
 }
 
 #[tauri::command]
-fn unpair_bridge(supervisor: tauri::State<'_, Supervisor>) -> Result<BridgeStatus, String> {
-    supervisor.unpair()
+async fn unpair_bridge(supervisor: tauri::State<'_, Supervisor>) -> Result<BridgeStatus, String> {
+    let supervisor = supervisor.inner().clone();
+    run_blocking(move || supervisor.unpair()).await
 }
 
 #[tauri::command]
@@ -312,9 +333,12 @@ pub fn run() {
                     "open" => show_main(app),
                     "toggle" => {
                         let supervisor = app.state::<Supervisor>();
+                        // start()/pause() may wait on the op lock behind an
+                        // in-flight pair(); keep that off the main thread.
                         match supervisor.status().state {
                             supervisor::BridgeState::Paused => {
-                                supervisor.start();
+                                let supervisor = supervisor.inner().clone();
+                                tauri::async_runtime::spawn_blocking(move || supervisor.start());
                             }
                             // Nothing to pause/resume before pairing exists
                             // — falling through to pause() here would flip
@@ -329,7 +353,8 @@ pub fn run() {
                                 show_main(app);
                             }
                             _ => {
-                                supervisor.pause();
+                                let supervisor = supervisor.inner().clone();
+                                tauri::async_runtime::spawn_blocking(move || supervisor.pause());
                             }
                         }
                     }
@@ -423,5 +448,43 @@ mod installer_tests {
                 r#"!insertmacro CheckIfAppIsRunning "mullion-bridge-worker.exe" "Mullion Bridge Worker""#
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_blocking_returns_the_closure_result_off_the_calling_thread() {
+        let caller = std::thread::current().id();
+        let ok = tauri::async_runtime::block_on(run_blocking(move || {
+            assert_ne!(std::thread::current().id(), caller);
+            Ok(7)
+        }));
+        assert_eq!(ok, Ok(7));
+
+        let err: Result<(), String> =
+            tauri::async_runtime::block_on(run_blocking(|| Err("boom".to_string())));
+        assert_eq!(err, Err("boom".to_string()));
+    }
+
+    #[test]
+    fn run_blocking_maps_a_panic_to_an_error_string() {
+        let result: Result<(), String> =
+            tauri::async_runtime::block_on(run_blocking(|| panic!("worker panicked")));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn unpair_runs_through_run_blocking() {
+        let app = tauri::test::mock_app();
+        let dir = std::env::temp_dir().join(format!("helper-run-blocking-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let supervisor = Supervisor::new(app.handle().clone(), dir.clone()).unwrap();
+        let status = tauri::async_runtime::block_on(run_blocking(move || supervisor.unpair()))
+            .expect("unpair should succeed");
+        assert_eq!(status.state, supervisor::BridgeState::Unpaired);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

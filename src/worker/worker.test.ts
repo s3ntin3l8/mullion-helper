@@ -1,8 +1,8 @@
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { runWorker, describeWsError } from "./helper.mjs";
+import { runWorker, describeWsError, applyRenewalReply, loadCredential } from "./helper.mjs";
 
 const created: string[] = [];
 function io(stateDir: string) {
@@ -75,5 +75,24 @@ describe("describeWsError", () => {
   it("never echoes the underlying error's free-form message", () => {
     const description = describeWsError({ error: { code: "ECONNREFUSED", message: "a secret internal path leaked here" } });
     expect(description).not.toContain("secret internal path");
+  });
+});
+
+describe("applyRenewalReply", () => {
+  const current = { baseUrl: "https://mullion.example", bridgeId: "12345678-1234-1234-1234-123456789abc", sessionId: "a".repeat(64), expiresAt: "2099-01-01T00:00:00.000Z" };
+
+  it("persists the rotated session id to disk and returns the new credential", () => {
+    const state = mkdtempSync(join(tmpdir(), "mullion-worker-")); created.push(state);
+    const context = io(state);
+    const next = applyRenewalReply(context, current, { session_id: "b".repeat(64), expires_at: "2100-01-01T00:00:00.000Z" });
+    expect(next).toMatchObject({ sessionId: "b".repeat(64), expiresAt: "2100-01-01T00:00:00.000Z", bridgeId: current.bridgeId });
+    expect(loadCredential(context)).toMatchObject({ sessionId: "b".repeat(64), expiresAt: "2100-01-01T00:00:00.000Z" });
+  });
+
+  it("refuses a malformed reply and writes nothing", () => {
+    const state = mkdtempSync(join(tmpdir(), "mullion-worker-")); created.push(state);
+    expect(() => applyRenewalReply(io(state), current, { session_id: "nope", expires_at: "2100-01-01T00:00:00.000Z" })).toThrow(/unexpected renewal reply/);
+    expect(() => applyRenewalReply(io(state), current, undefined)).toThrow(/unexpected renewal reply/);
+    expect(readdirSync(state)).toEqual([]);
   });
 });

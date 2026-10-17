@@ -11,3 +11,10 @@ supervisor. Events are `connected` (`bridge_id`, `base_url`), `disconnected`,
 `connect_failed` (`message`), `session_renewed` (`expires_at`), `renewal_retry`
 (`delay_ms`, `message`), `renewal_rejected`, and `dead_credential` (`message`).
 Human-readable diagnostics remain on stderr.
+
+If no inbound mux frame (data or ping) arrives for `DEFAULT_IDLE_TIMEOUT_MS`
+(50s, about three of the primary's 15s pings), the connection is treated as
+half-open: it is closed locally, `disconnected` is emitted, and the reconnect
+loop resumes. A successful renewal reply received while the worker is being
+stopped by SIGINT/SIGTERM is still persisted; a hard kill (as the desktop
+supervisor does) relies on the primary keeping the previous session id valid.

@@ -4,8 +4,11 @@
 // straight from the SVG (axis-aligned, rounded, 32-unit viewBox) and does its
 // own supersampled coverage. Run by hand when the logo changes:
 //   npm run icons:tray
+// `--check` (npm run check:icons, part of lint) re-renders and compares decoded
+// RGBA pixels against the committed PNG instead of writing it; pixels, not
+// bytes, because deflate output differs across zlib versions.
 import { readFileSync, writeFileSync } from "node:fs";
-import { deflateSync } from "node:zlib";
+import { deflateSync, inflateSync } from "node:zlib";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -111,6 +114,60 @@ const png = Buffer.concat([
   chunk("IEND", Buffer.alloc(0)),
 ]);
 
+function decodePng(buffer) {
+  const stale = (why) => new Error(`tray-${SIZE}.png ${why} - run npm run icons:tray`);
+  if (!buffer.subarray(0, 8).equals(png.subarray(0, 8))) throw stale("is not a PNG");
+  let ihdr;
+  const idat = [];
+  for (let at = 8; at + 8 <= buffer.length; ) {
+    const length = buffer.readUInt32BE(at);
+    const type = buffer.toString("ascii", at + 4, at + 8);
+    const data = buffer.subarray(at + 8, at + 8 + length);
+    if (type === "IHDR") ihdr = data;
+    else if (type === "IDAT") idat.push(data);
+    at += 12 + length;
+  }
+  if (!ihdr || idat.length === 0) throw stale("is missing IHDR/IDAT");
+  if (ihdr.readUInt32BE(0) !== SIZE || ihdr.readUInt32BE(4) !== SIZE || ihdr[8] !== 8 || ihdr[9] !== 6 || ihdr[12] !== 0) {
+    throw stale(`is not a non-interlaced ${SIZE}x${SIZE} 8-bit RGBA image`);
+  }
+  const data = inflateSync(Buffer.concat(idat));
+  const pixels = Buffer.alloc(stride * SIZE);
+  for (let y = 0; y < SIZE; y++) {
+    const filter = data[y * (stride + 1)];
+    for (let i = 0; i < stride; i++) {
+      const left = i >= 4 ? pixels[y * stride + i - 4] : 0;
+      const up = y > 0 ? pixels[(y - 1) * stride + i] : 0;
+      const upLeft = y > 0 && i >= 4 ? pixels[(y - 1) * stride + i - 4] : 0;
+      const p = left + up - upLeft;
+      const [pa, pb, pc] = [Math.abs(p - left), Math.abs(p - up), Math.abs(p - upLeft)];
+      const predictor = [
+        0,
+        left,
+        up,
+        (left + up) >> 1,
+        pa <= pb && pa <= pc ? left : pb <= pc ? up : upLeft,
+      ][filter];
+      if (predictor === undefined) throw stale(`uses unknown PNG filter ${filter}`);
+      pixels[y * stride + i] = (data[y * (stride + 1) + 1 + i] + predictor) & 0xff;
+    }
+  }
+  return pixels;
+}
+
 const out = join(root, "src-tauri", "icons", `tray-${SIZE}.png`);
-writeFileSync(out, png);
-console.log(`wrote ${out} (${png.length} bytes)`);
+if (process.argv.includes("--check")) {
+  const committed = decodePng(readFileSync(out));
+  let differing = 0;
+  for (let i = 0; i < rgba.length; i += 4) {
+    if (!rgba.subarray(i, i + 4).equals(committed.subarray(i, i + 4))) differing++;
+  }
+  if (differing > 0) {
+    console.error(`tray-${SIZE}.png is stale (${differing} pixels differ from mullion-helper.svg) - run npm run icons:tray`);
+    process.exit(1);
+  }
+  console.log(`tray-${SIZE}.png matches mullion-helper.svg.`);
+} else {
+  writeFileSync(out, png);
+  console.log(`wrote ${out} (${png.length} bytes)`);
+}
