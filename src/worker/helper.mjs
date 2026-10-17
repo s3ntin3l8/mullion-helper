@@ -529,6 +529,21 @@ function saveCredential(io, credential) {
   }
 }
 
+/**
+ * Validates a successful `/api/bridges/renew` reply and persists the rotated
+ * credential to disk. Returns the new credential; throws (persisting
+ * nothing) on a malformed reply. Split out of renewSession so the
+ * persist-even-when-stopped behaviour (issue #76) is unit-testable.
+ */
+export function applyRenewalReply(io, current, json) {
+  if (!isValidSessionToken(json?.session_id) || !isValidExpiresAt(json?.expires_at)) {
+    throw new Error("unexpected renewal reply shape — refusing to persist it");
+  }
+  const next = { ...current, sessionId: json.session_id, expiresAt: json.expires_at };
+  saveCredential(io, next);
+  return next;
+}
+
 function describeInvocation(io) {
   const program = `"${io.execPath ?? process.execPath}"`;
   return `${(io.platform ?? process.platform) === "win32" ? "& " : ""}${program}`;
@@ -824,7 +839,7 @@ async function runRun(args, io) {
         signal: AbortSignal.timeout(RENEW_TIMEOUT_MS),
         ...(renewInsecure ? { dispatcher: INSECURE_DISPATCHER } : {}),
       });
-      if (stopped) return;
+      if (stopped && !res.ok) return;
       if (res.status === 401) {
         renewalRejected = true;
         stopped = true;
@@ -843,28 +858,13 @@ async function runRun(args, io) {
       }
       if (!res.ok) throw new RenewalHttpError(res.status, res.headers.get("retry-after"));
       const json = await res.json();
-      if (!isValidSessionToken(json.session_id) || !isValidExpiresAt(json.expires_at)) {
-        throw new Error("unexpected renewal reply shape — refusing to persist it");
-      }
-      credential = { ...current, sessionId: json.session_id, expiresAt: json.expires_at };
-      // Issue #1060 — in-memory `credential` is reassigned BEFORE
-      // saveCredential writes the rotated values to disk. If saveCredential
-      // throws (disk full, permission denied — see its own catch block),
-      // in-memory state is momentarily ahead of disk: the live `run`
-      // process would use the new sessionId immediately on its next
-      // reconnect, while a fresh process spawned to recover would read
-      // the OLD sessionId from disk and get rejected by the primary as
-      // superseded. The process-level recovery is a self-healing refresh
-      // from the same primary that issued the rotation, but the brief
-      // window of in-memory-only state is real — not a correctness issue
-      // for a single long-running `run`, only a "what does a fresh
-      // `cat ssh-agent-bridge.json` see" inconsistency if a kill -9 lands
-      // during it. Documented here, not reordered: saveCredential's own
-      // write-to-temp-then-rename (its own doc) already makes a
-      // successful call atomic on every platform this ships for, so the
-      // "thrown before rename completes" branch is the only one where
-      // the disk side can ever end up behind in-memory.
-      saveCredential(io, credential);
+      // Issue #76 — the server rotated the session id the moment it sent
+      // this 200, so the reply is persisted even when `stopped` was set
+      // while the request was in flight: dropping it would leave disk
+      // holding an id the server has already retired. Only the follow-up
+      // (log, event, re-arm) is skipped once stopped.
+      credential = applyRenewalReply(io, current, json);
+      if (stopped) return;
       renewAttempt = 0;
       io.stderr.write(`session renewed — valid until ${json.expires_at}\n`);
       emitEvent("session_renewed", { expires_at: json.expires_at });
