@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.16](https://github.com/s3ntin3l8/mullion-helper/compare/v0.1.15...v0.1.16) (2026-10-18)
+
+
+### Features
+
+* show release notes in the update banner ([#94](https://github.com/s3ntin3l8/mullion-helper/issues/94)) ([88eb0bd](https://github.com/s3ntin3l8/mullion-helper/commit/88eb0bde78b9bb595f22e95ac752e97e1d97ad25)), closes [#92](https://github.com/s3ntin3l8/mullion-helper/issues/92)
+
+
+### Bug Fixes
+
+* **release:** pass release notes to tauri-action for latest.json ([#93](https://github.com/s3ntin3l8/mullion-helper/issues/93)) ([1cc0de5](https://github.com/s3ntin3l8/mullion-helper/commit/1cc0de5e9a9225c39c10bea384fafe270523808e)), closes [#90](https://github.com/s3ntin3l8/mullion-helper/issues/90)
+* stop tauri-action from blanking release notes ([#89](https://github.com/s3ntin3l8/mullion-helper/issues/89)) ([59be34f](https://github.com/s3ntin3l8/mullion-helper/commit/59be34fa1a85502cd3f0a1599faef2feff982aec))
+
 ## [0.1.15](https://github.com/s3ntin3l8/mullion-helper/compare/v0.1.14...v0.1.15) (2026-10-17)
 
 
