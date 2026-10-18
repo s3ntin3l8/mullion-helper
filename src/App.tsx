@@ -4,6 +4,7 @@ import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { api } from "./api";
 import { subscribeWithSnapshot } from "./subscriptions";
 import type { AgentCandidate, BridgeStatus, Notice, Settings, UpdateResult } from "./types";
+import { parseReleaseNotes } from "./releaseNotes";
 
 const CUSTOM_PATH = "__custom__";
 
@@ -46,6 +47,21 @@ function infoNotice(summary: string): Notice {
   return { kind: "info", summary };
 }
 
+function availableUpdate(result: UpdateResult) {
+  return result.available && result.version ? { version: result.version, notes: result.notes } : null;
+}
+
+function ReleaseNotes({ notes }: { notes: string | null }) {
+  const sections = parseReleaseNotes(notes);
+  if (sections.length === 0) return null;
+  return <details className="release-notes"><summary>What's new</summary><div>
+    {sections.map((section, index) => <div key={index}>
+      {section.heading && <h3>{section.heading}</h3>}
+      <ul>{section.items.map((item, itemIndex) => <li key={itemIndex}>{item}</li>)}</ul>
+    </div>)}
+  </div></details>;
+}
+
 function BrandMark() {
   return <svg className="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
     <rect fill="#11211a" x="1" y="1" width="13.5" height="13.5" rx="2" />
@@ -68,7 +84,7 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [confirmingUnpair, setConfirmingUnpair] = useState(false);
-  const [updateVersion, setUpdateVersion] = useState<string | null>(null);
+  const [update, setUpdate] = useState<{ version: string; notes: string | null } | null>(null);
   const [diagnosticsPath, setDiagnosticsPath] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [version, setVersion] = useState<string | null>(null);
@@ -130,7 +146,7 @@ export function App() {
     return subscribeWithSnapshot<UpdateResult>(
       (receive) => api.isDesktop ? listen<UpdateResult>("update-status", (event) => receive(event.payload)) : Promise.resolve(() => {}),
       api.updateStatus,
-      (result) => setUpdateVersion(result.available ? result.version : null),
+      (result) => setUpdate(availableUpdate(result)),
       () => {},
     );
   }, []);
@@ -215,7 +231,7 @@ export function App() {
   async function checkUpdates() {
     await perform(async () => {
       const result = await api.checkForUpdates();
-      setUpdateVersion(result.available ? result.version : null);
+      setUpdate(availableUpdate(result));
       setNotice(infoNotice(result.available ? `Version ${result.version} is available.` : "Mullion Helper is up to date."));
     });
   }
@@ -281,7 +297,7 @@ export function App() {
           : <button type="button" className="link danger" onClick={() => setConfirmingUnpair(true)}>Unpair this computer</button>}</div>
       </div>}
     </section>}
-    {updateVersion && <section className="update"><div><strong>Mullion Helper {updateVersion} is available</strong><span>The app will restart after installing.</span></div><button disabled={busy} onClick={() => void perform(api.installUpdate)}>Install update</button></section>}
+    {update && <section className="update"><div><strong>Mullion Helper {update.version} is available</strong><span>The app will restart after installing.</span><ReleaseNotes notes={update.notes} /></div><button disabled={busy} onClick={() => void perform(api.installUpdate)}>Install update</button></section>}
     {notice && (notice.kind === "error"
       ? <section className="notice notice-error" role="alert">
           <p>{notice.summary}</p>

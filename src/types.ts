@@ -3,5 +3,5 @@ export interface BridgeStatus { state: BridgeState; base_url: string | null; bri
 export interface Settings { ssh_auth_sock: string; insecure: boolean; launch_at_login: boolean; }
 export interface AgentCandidate { path: string; label: string; reachable: boolean; identities: number | null; }
 export interface AgentSocketList { candidates: AgentCandidate[]; chosen: string | null; }
-export interface UpdateResult { available: boolean; version: string | null; }
+export interface UpdateResult { available: boolean; version: string | null; notes: string | null; }
 export interface Notice { kind: "info" | "error"; summary: string; details?: string; }
