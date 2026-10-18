@@ -26,6 +26,12 @@ describe("parseReleaseNotes", () => {
     expect(parseReleaseNotes("Hello\n- there\n### Empty\n")).toEqual([{ heading: null, items: ["Hello", "there"] }]);
   });
 
+  it("skips the Full Changelog trailer of auto-generated notes", () => {
+    expect(parseReleaseNotes("## What's Changed\n* fix x by @a in https://x/1\n\n**Full Changelog**: https://x/compare/a...b")).toEqual([
+      { heading: "What's Changed", items: ["fix x by @a in https://x/1"] },
+    ]);
+  });
+
   it("returns nothing for empty or missing notes", () => {
     expect(parseReleaseNotes(null)).toEqual([]);
     expect(parseReleaseNotes("  \n\n")).toEqual([]);

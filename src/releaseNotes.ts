@@ -1,8 +1,9 @@
 export interface NotesSection { heading: string | null; items: string[]; }
 
 // Release Please groups commits as `### Heading` + `* text ([#N](url)) ([sha](url))`.
-// The webview has no opener plugin, so links would navigate the app window: drop
-// them and keep the text. Output is rendered as React text, never as HTML.
+// The webview has no opener plugin, so links would navigate the app window.
+// Parenthesised link refs like `([#N](url))` are dropped; any other link is
+// flattened to its label. Output is rendered as React text, never as HTML.
 function plain(text: string): string {
   return text
     .replace(/\s*\(\[[^\]]*\]\([^)]*\)\)/g, "")
@@ -21,7 +22,8 @@ export function parseReleaseNotes(body: string | null): NotesSection[] {
   };
   for (const raw of (body ?? "").split(/\r?\n/)) {
     const line = raw.trim();
-    if (!line) continue;
+    // GitHub's auto-generated notes (pre-Release Please) end with a bare URL.
+    if (!line || /^\*\*Full Changelog\*\*/.test(line)) continue;
     const heading = /^#{1,6}\s+(.*)$/.exec(line);
     if (heading) {
       const text = plain(heading[1]);

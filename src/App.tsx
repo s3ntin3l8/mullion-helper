@@ -56,7 +56,7 @@ function ReleaseNotes({ notes }: { notes: string | null }) {
   if (sections.length === 0) return null;
   return <details className="release-notes"><summary>What's new</summary><div>
     {sections.map((section, index) => <div key={index}>
-      {section.heading && <h4>{section.heading}</h4>}
+      {section.heading && <h3>{section.heading}</h3>}
       <ul>{section.items.map((item, itemIndex) => <li key={itemIndex}>{item}</li>)}</ul>
     </div>)}
   </div></details>;
