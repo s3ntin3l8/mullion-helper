@@ -29,6 +29,7 @@ jobs:
       has_release: ${{ steps.release.outputs.has_release }}
       tag_name: ${{ steps.release.outputs.tag_name }}
       release_id: ${{ steps.release.outputs.release_id }}
+      release_body: ${{ steps.release.outputs.release_body }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -56,12 +57,13 @@ jobs:
             echo "has_release=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if ! release_meta="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft,databaseId)"; then
+          if ! release_meta="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft,databaseId,body)"; then
             echo "Release $tag does not exist or could not be read" >&2
             exit 1
           fi
           is_draft="$(jq -r .isDraft <<< "$release_meta")"
           release_id="$(jq -r .databaseId <<< "$release_meta")"
+          release_body="$(jq -r '.body // ""' <<< "$release_meta")"
           # tauri-action turns a non-numeric releaseId into NaN and silently
           # skips every upload (exit 0), so fail here instead.
           if ! [[ "$release_id" =~ ^[0-9]+$ ]]; then
@@ -79,6 +81,17 @@ jobs:
           echo "has_release=true" >> "$GITHUB_OUTPUT"
           echo "tag_name=$tag" >> "$GITHUB_OUTPUT"
           echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
+          if [[ -z "$release_body" ]]; then
+            echo "::notice::Release $tag has an empty body; latest.json notes will be empty."
+          fi
+          # The body is multi-line markdown, so it needs the heredoc form
+          # with a delimiter the body cannot contain.
+          delim="EOF_$(openssl rand -hex 16)"
+          {
+            echo "release_body<<$delim"
+            printf '%s\n' "$release_body"
+            echo "$delim"
+          } >> "$GITHUB_OUTPUT"
 
   build-installers:
     name: Build ${{ matrix.label }} installer
@@ -128,6 +141,10 @@ jobs:
           # getOrCreateRelease only runs when tagName is set without releaseId
           # (checked at tauri-action@v1 1deb371b); re-check on a major bump.
           releaseId: ${{ needs.resolve-release.outputs.release_id }}
+          # With releaseId set, releaseBody only feeds latest.json `notes` and
+          # never rewrites the release. Each matrix job rewrites `notes`, so
+          # every job must pass the same body (they share this one output).
+          releaseBody: ${{ needs.resolve-release.outputs.release_body }}
           args: --bundles ${{ matrix.bundles }}
           updaterJsonPreferNsis: true
       # This is the artifact users actually install, and the one that
