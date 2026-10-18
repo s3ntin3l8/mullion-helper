@@ -85,9 +85,9 @@ describe("api.appName", () => {
 describe("native lifecycle and cached updates", () => {
   it("loads cached availability and passes the operation token and outcome to Rust", async () => {
     (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {};
-    invokeMock.mockResolvedValueOnce({ available: true, version: "9.0.0" }).mockResolvedValueOnce(42);
+    invokeMock.mockResolvedValueOnce({ available: true, version: "9.0.0", notes: "### Bug Fixes" }).mockResolvedValueOnce(42);
     const { api } = await import("./api");
-    await expect(api.updateStatus()).resolves.toEqual({ available: true, version: "9.0.0" });
+    await expect(api.updateStatus()).resolves.toEqual({ available: true, version: "9.0.0", notes: "### Bug Fixes" });
     await expect(api.beginUiOperation()).resolves.toBe(42);
     await api.endUiOperation(42, false);
     expect(invokeMock.mock.calls).toEqual([
@@ -97,7 +97,7 @@ describe("native lifecycle and cached updates", () => {
 
   it("keeps browser previews independent of native lifecycle commands", async () => {
     const { api } = await import("./api");
-    await expect(api.updateStatus()).resolves.toEqual({ available: false, version: null });
+    await expect(api.updateStatus()).resolves.toEqual({ available: false, version: null, notes: null });
     const operation = await api.beginUiOperation();
     await api.endUiOperation(operation, true);
     expect(invokeMock).not.toHaveBeenCalled();

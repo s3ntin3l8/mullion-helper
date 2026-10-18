@@ -14,6 +14,13 @@ const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 pub struct UpdateResult {
     pub available: bool,
     pub version: Option<String>,
+    pub notes: Option<String>,
+}
+
+/// The updater's `body` is the release notes from `latest.json`; it is empty
+/// for releases published without any, which the UI treats as "no notes".
+fn clean_notes(body: Option<String>) -> Option<String> {
+    body.filter(|notes| !notes.trim().is_empty())
 }
 
 #[derive(Default)]
@@ -85,7 +92,8 @@ impl Updates {
                     .map_err(|error| error.to_string())?;
                 Ok(UpdateResult {
                     available: update.is_some(),
-                    version: update.map(|value| value.version),
+                    version: update.as_ref().map(|value| value.version.clone()),
+                    notes: update.and_then(|value| clean_notes(value.body)),
                 })
             },
             |status| {
@@ -170,7 +178,16 @@ mod tests {
         UpdateResult {
             available: true,
             version: Some("9.0.0".into()),
+            notes: Some("### Bug Fixes\n\n* fix a thing".into()),
         }
+    }
+
+    #[test]
+    fn blank_notes_are_treated_as_absent() {
+        assert_eq!(clean_notes(None), None);
+        assert_eq!(clean_notes(Some(String::new())), None);
+        assert_eq!(clean_notes(Some(" \n\t".into())), None);
+        assert_eq!(clean_notes(Some("* fix".into())), Some("* fix".into()));
     }
 
     #[tokio::test(start_paused = true)]

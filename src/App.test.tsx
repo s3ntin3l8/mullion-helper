@@ -25,8 +25,8 @@ const { mockApi } = vi.hoisted(() => {
       start: vi.fn(async (): Promise<BridgeStatus> => unpairedStatus),
       pause: vi.fn(async (): Promise<BridgeStatus> => unpairedStatus),
       saveSettings: vi.fn(async (settings: Settings): Promise<Settings> => settings),
-      checkForUpdates: vi.fn(async () => ({ available: false, version: null as string | null })),
-      updateStatus: vi.fn(async () => ({ available: false, version: null as string | null })),
+      checkForUpdates: vi.fn(async () => ({ available: false, version: null as string | null, notes: null as string | null })),
+      updateStatus: vi.fn(async () => ({ available: false, version: null as string | null, notes: null as string | null })),
       beginUiOperation: vi.fn(async () => 1),
       endUiOperation: vi.fn(async () => {}),
       installUpdate: vi.fn(async (): Promise<void> => undefined),
@@ -233,10 +233,26 @@ describe("Mullion Helper window", () => {
   });
 
   it("shows cached update availability on reopening without initiating a check", async () => {
-    mockApi.updateStatus.mockResolvedValueOnce({ available: true, version: "9.0.0" });
+    mockApi.updateStatus.mockResolvedValueOnce({ available: true, version: "9.0.0", notes: null });
     render(<App />);
     expect(await screen.findByText("Mullion Helper 9.0.0 is available")).toBeVisible();
     expect(mockApi.checkForUpdates).not.toHaveBeenCalled();
+  });
+
+  it("lists release notes in a collapsed What's new section of the update banner", async () => {
+    mockApi.updateStatus.mockResolvedValueOnce({ available: true, version: "9.0.0", notes: "### Bug Fixes\n\n* fix a thing ([#1](https://x/1))" });
+    render(<App />);
+    await screen.findByText("Mullion Helper 9.0.0 is available");
+    expect(screen.getByText("What's new").closest("details")).not.toHaveAttribute("open");
+    expect(screen.getByRole("heading", { name: "Bug Fixes" })).toBeInTheDocument();
+    expect(screen.getByText("fix a thing")).toBeInTheDocument();
+  });
+
+  it("omits What's new when the update has no notes", async () => {
+    mockApi.updateStatus.mockResolvedValueOnce({ available: true, version: "9.0.0", notes: "  " });
+    render(<App />);
+    await screen.findByText("Mullion Helper 9.0.0 is available");
+    expect(screen.queryByText("What's new")).not.toBeInTheDocument();
   });
 
   it("keeps pairing guarded through autostart and the settings refresh", async () => {
@@ -297,7 +313,7 @@ describe("Mullion Helper window", () => {
   });
 
   it("keeps update installation errors visible and re-enables the controls", async () => {
-    mockApi.updateStatus.mockResolvedValueOnce({ available: true, version: "9.0.0" });
+    mockApi.updateStatus.mockResolvedValueOnce({ available: true, version: "9.0.0", notes: null });
     mockApi.installUpdate.mockRejectedValueOnce("Download failed");
     const user = userEvent.setup();
     render(<App />);
