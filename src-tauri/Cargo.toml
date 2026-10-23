@@ -2,6 +2,7 @@
 name = "mullion-helper"
 version = "0.1.16"
 description = "Native tray app supervising the Mullion SSH-agent bridge"
+license = "AGPL-3.0-or-later"
 edition = "2021"
 
 [lib]

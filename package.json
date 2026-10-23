@@ -4,6 +4,7 @@
   "version": "0.1.16",
   "type": "module",
   "description": "Native tray app for the Mullion SSH-agent bridge",
+  "license": "AGPL-3.0-or-later",
   "engines": {
     "node": ">=26"
   },
