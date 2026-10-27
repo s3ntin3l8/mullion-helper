@@ -121,7 +121,7 @@ jobs:
     # Restrict to trusted commenters -- otherwise any user on a public repo could
     # post "@s3ntin3l8-hermes Review" and trigger a run that inherits HERMES_*
     # secrets and executes on the self-hosted runner. Same author_association
-    # gate the shared reusable workflow enforces for claude.yml's on-demand
+    # gate the shared reusable workflow enforces for claude-code.yml's on-demand
     # path (claude-code.yml).
     if: >-
       github.event_name == 'issue_comment' &&
