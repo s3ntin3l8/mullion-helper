@@ -243,7 +243,7 @@ function injectBlob() {
   // exercised anywhere — no macOS CI job existed, and it can only run on
   // real macOS hardware (postject operates on the actual binary format of
   // whatever `copyNodeBinary()` just copied; there's no cross-build path).
-  // `.github/workflows/ci-cd.yml`'s `frontend-and-worker` job's macos-14
+  // `.github/workflows/ci-cd.yml`'s `frontend-and-worker` job's macos-15
   // matrix entry is the first real exercise of this branch.
   if (process.platform === "darwin") {
     args.push("--macho-segment-name", "NODE_SEA");
