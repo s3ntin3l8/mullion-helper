@@ -105,7 +105,7 @@ jobs:
       max-parallel: 1
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             label: macOS Apple Silicon DMG and updater
             # The updater archive is generated from the macOS app bundle; a
             # DMG-only build explicitly skips updater artifacts.
@@ -154,7 +154,7 @@ jobs:
       # staged SEA before bundling; this checks Tauri's own re-sign of the
       # nested binary survived bundling with the entitlement intact.
       - name: Assert bundled macOS worker carries the JIT entitlement
-        if: matrix.os == 'macos-14'
+        if: matrix.os == 'macos-15'
         shell: bash
         run: |
           set -euo pipefail
